@@ -152,6 +152,13 @@ TSNode cbm_lisp_named_child_skip_comments(TSNode node, uint32_t want);
  * than defining one. */
 bool cbm_chialisp_is_def_head(const char *t);
 
+// Find every child node matching `kind` (unlike cbm_find_child_by_kind,
+// which stops at the first match). Writes up to `max` nodes into `out`;
+// returns how many were found. Repeated sibling nodes of the same kind are
+// common in some grammars (e.g. C#/PHP stack each `[Attr]` as its own
+// attribute_list child) — see #1692.
+int cbm_find_children_by_kind(TSNode parent, const char *kind, TSNode *out, int max);
+
 // Check if node kind matches a set of types (NULL-terminated array of strings).
 bool cbm_kind_in_set(TSNode node, const char **types);
 
