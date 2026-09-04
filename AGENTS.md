@@ -73,7 +73,7 @@ docs/
 |------|------|------|
 | 图谱查询静默漏报 | CALLS 边丢失时 trace_path 返回 callers_total:0，与真无调用不可分 | 「没有调用方」类否定结论必须先 grep 复核再下 |
 | `detect_changes` 非法 direction | 上游静默返回空（fork 未改此点，被 #4 的 fail-loud 原则点名） | 改这里时顺手修掉，测试先行 |
-| Windows DACL 检查 | `CBM_SKIP_DACL_HARDENING=1` 跳过的是 ACE 遍历，属主校验保留 | 别把属主校验也跳了，那是账号边界 |
+| Windows DACL 检查 | fork 默认**跳过**不可信 ACE 遍历；`CBM_DACL_HARDENING=1` 才开回 | 属主校验两种模式都保留，别动它；多用户主机文档要提示开回 |
 | 内存预算 | cap 只封默认分数，显式 env 永远可上调（`default_capped` 标志随之清零） | 改 resolve_budget 时保持这个单语义 |
 | 守护进程冷启 | ~5s（Windows + DACL + 指纹哈希） | CLI 面的策略拒绝必须在 bootstrap **之前**（run_cli 已前置，别挪到 daemon 执行后） |
 
