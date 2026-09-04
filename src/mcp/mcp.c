@@ -841,6 +841,16 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
         "search_graph",     "trace_path",    "get_code_snippet", "get_file_outline",
         "get_architecture", "list_projects", "index_status",     "check_index_coverage",
     };
+    /* Fork patch (fork issue #4): the default agent surface. Only the three
+     * tools that beat the grep/codegraph baseline in side-by-side trials —
+     * architecture overview, whole-repo complexity ranking, diff-driven blast
+     * radius — survive. Everything else duplicates what the agent's existing
+     * grep/symbol tools already do, with a cold-start penalty they don't pay. */
+    static const char *const minimal_tools[] = {
+        "get_architecture",
+        "query_graph",
+        "detect_changes",
+    };
     if (!name) {
         return false;
     }
@@ -855,6 +865,9 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     } else if (profile == CBM_MCP_TOOL_PROFILE_SCOUT) {
         allowed = scout_tools;
         allowed_count = sizeof(scout_tools) / sizeof(scout_tools[0]);
+    } else if (profile == CBM_MCP_TOOL_PROFILE_MINIMAL) {
+        allowed = minimal_tools;
+        allowed_count = sizeof(minimal_tools) / sizeof(minimal_tools[0]);
     }
     for (size_t i = 0U; i < allowed_count; i++) {
         if (strcmp(name, allowed[i]) == 0) {
@@ -865,7 +878,19 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
 }
 
 static const char *mcp_tool_profile_name(cbm_mcp_tool_profile_t profile) {
-    return profile == CBM_MCP_TOOL_PROFILE_SCOUT ? "scout" : "analysis";
+    switch (profile) {
+    case CBM_MCP_TOOL_PROFILE_ALL:
+        return "all";
+    case CBM_MCP_TOOL_PROFILE_ANALYSIS:
+        return "analysis";
+    case CBM_MCP_TOOL_PROFILE_SCOUT:
+        return "scout";
+    case CBM_MCP_TOOL_PROFILE_MINIMAL:
+    default:
+        /* Out-of-range values read as the fork default, never as a named
+         * preset — error text must not advertise "analysis" as the norm. */
+        return "minimal";
+    }
 }
 
 int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
@@ -873,11 +898,22 @@ int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
     if (argc < 0 || !argv || !profile_out) {
         return -1;
     }
-    *profile_out = CBM_MCP_TOOL_PROFILE_ALL;
+    /* Fork patch (fork issue #4): absence of the flag selects the minimal
+     * surface, not the full one. `--tool-profile=all` restores the legacy
+     * behavior explicitly. */
+    *profile_out = CBM_MCP_TOOL_PROFILE_MINIMAL;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!arg) {
             return -1;
+        }
+        if (strcmp(arg, "--tool-profile=all") == 0) {
+            *profile_out = CBM_MCP_TOOL_PROFILE_ALL;
+            continue;
+        }
+        if (strcmp(arg, "--tool-profile=minimal") == 0) {
+            *profile_out = CBM_MCP_TOOL_PROFILE_MINIMAL;
+            continue;
         }
         if (strcmp(arg, "--tool-profile=analysis") == 0) {
             *profile_out = CBM_MCP_TOOL_PROFILE_ANALYSIS;
@@ -891,7 +927,11 @@ int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
             if (i + 1 >= argc || !argv[i + 1]) {
                 return -1;
             }
-            if (strcmp(argv[i + 1], "analysis") == 0) {
+            if (strcmp(argv[i + 1], "all") == 0) {
+                *profile_out = CBM_MCP_TOOL_PROFILE_ALL;
+            } else if (strcmp(argv[i + 1], "minimal") == 0) {
+                *profile_out = CBM_MCP_TOOL_PROFILE_MINIMAL;
+            } else if (strcmp(argv[i + 1], "analysis") == 0) {
                 *profile_out = CBM_MCP_TOOL_PROFILE_ANALYSIS;
             } else if (strcmp(argv[i + 1], "scout") == 0) {
                 *profile_out = CBM_MCP_TOOL_PROFILE_SCOUT;
@@ -912,66 +952,11 @@ bool cbm_mcp_tool_profile_allows_http(cbm_mcp_tool_profile_t profile) {
     return profile == CBM_MCP_TOOL_PROFILE_ALL;
 }
 
-static int mcp_allowed_tool_count(cbm_mcp_tool_profile_t profile) {
-    int count = 0;
-    for (int i = 0; i < TOOL_COUNT; i++) {
-        if (mcp_tool_allowed(profile, TOOLS[i].name)) {
-            count++;
-        }
-    }
-    return count;
-}
-
-static char *cbm_mcp_tools_list_range(cbm_mcp_tool_profile_t profile, int offset, int limit,
-                                      bool include_next_cursor) {
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-
-    yyjson_mut_val *tools = yyjson_mut_arr(doc);
-
-    if (offset < 0) {
-        offset = 0;
-    }
-    int allowed_count = mcp_allowed_tool_count(profile);
-    if (offset > allowed_count) {
-        offset = allowed_count;
-    }
-    if (limit < 0 || limit > allowed_count) {
-        limit = allowed_count;
-    }
-
-    int end = offset + limit;
-    if (end > allowed_count) {
-        end = allowed_count;
-    }
-
-    int visible = 0;
-    for (int i = 0; i < TOOL_COUNT && visible < end; i++) {
-        if (!mcp_tool_allowed(profile, TOOLS[i].name)) {
-            continue;
-        }
-        if (visible >= offset) {
-            mcp_add_tool_def(doc, tools, i);
-        }
-        visible++;
-    }
-
-    yyjson_mut_obj_add_val(doc, root, "tools", tools);
-    if (include_next_cursor && end < allowed_count) {
-        char cursor[32];
-        snprintf(cursor, sizeof(cursor), "%d", end);
-        yyjson_mut_obj_add_strcpy(doc, root, "nextCursor", cursor);
-    }
-
-    char *out = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
-    return out;
-}
-
-char *cbm_mcp_tools_list(void) {
-    return cbm_mcp_tools_list_range(CBM_MCP_TOOL_PROFILE_ALL, 0, TOOL_COUNT, false);
-}
+/* The srv-aware tools/list group (denylist + profile filtering:
+ * mcp_tool_disabled / mcp_tool_visible / mcp_visible_tool_count /
+ * cbm_mcp_tools_list_range / cbm_mcp_tools_list / cbm_mcp_tools_list_page)
+ * lives below cbm_mcp_server's struct definition, where the member accesses
+ * are legal — see cbm_mcp_server_set_tool_profile. */
 
 /* Return the JSON input_schema string for a tool by name, or NULL if unknown.
  * Used by the CLI to build --flag arguments and per-tool --help from the same
@@ -1054,8 +1039,20 @@ static size_t help_append(char *out, size_t cap, size_t len, const char *fmt, ..
 }
 
 char *cbm_mcp_tools_help_list(void) {
+    return cbm_mcp_tools_help_list_filtered(NULL);
+}
+
+/* Fork patch (fork issue #4): `disabled_csv` is the raw tools_disabled value;
+ * named tools are omitted so agents cannot discover (and retry) tools the
+ * config forbids. NULL/empty means nothing is filtered. */
+char *cbm_mcp_tools_help_list_filtered(const char *disabled_csv) {
     size_t cap = SLEN("Tools:") + 2; /* trailing newline + NUL */
+    int last_visible = -1;
     for (int i = 0; i < TOOL_COUNT; i++) {
+        if (cbm_config_tool_csv_contains(disabled_csv, TOOLS[i].name)) {
+            continue;
+        }
+        last_visible = i;
         cap += strlen(TOOLS[i].name) + SLEN(" ,\n "); /* per-tool worst case incl. a wrap */
     }
     char *out = malloc(cap);
@@ -1064,10 +1061,13 @@ char *cbm_mcp_tools_help_list(void) {
     }
     size_t len = help_append(out, cap, 0, "Tools:");
     size_t col = len;
-    for (int i = 0; i < TOOL_COUNT; i++) {
-        const char *sep = (i + 1 < TOOL_COUNT) ? "," : "";
+    for (int i = 0; i <= last_visible; i++) {
+        if (cbm_config_tool_csv_contains(disabled_csv, TOOLS[i].name)) {
+            continue;
+        }
+        const char *sep = (i < last_visible) ? "," : "";
         size_t item = SLEN(" ") + strlen(TOOLS[i].name) + strlen(sep);
-        if (i > 0 && col + item > MCP_HELP_TOOLS_WRAP_COL) {
+        if (col > 1 && col + item > MCP_HELP_TOOLS_WRAP_COL) {
             len += help_append(out, cap, len, "\n ");
             col = 1;
         }
@@ -1116,15 +1116,6 @@ static int mcp_tools_cursor_offset(const char *params_json, bool *has_cursor_out
 
     yyjson_doc_free(doc);
     return offset;
-}
-
-static char *cbm_mcp_tools_list_page(cbm_mcp_tool_profile_t profile, const char *params_json) {
-    bool has_cursor = false;
-    int offset = mcp_tools_cursor_offset(params_json, &has_cursor);
-    if (!has_cursor) {
-        return cbm_mcp_tools_list_range(profile, 0, TOOL_COUNT, false);
-    }
-    return cbm_mcp_tools_list_range(profile, offset, MCP_TOOLS_PAGE_SIZE, true);
 }
 
 /* ── Prompt definitions ───────────────────────────────────────── */
@@ -1345,6 +1336,17 @@ static const char MCP_SCOUT_SERVER_INSTRUCTIONS[] =
     "are provisional: do not make absence, exhaustive-impact, or dead-code claims. If the project "
     "is missing or stale, ask the parent agent to index or refresh it.";
 
+static const char MCP_MINIMAL_SERVER_INSTRUCTIONS[] =
+    "This is the minimal tool profile (fork patch): only the three graph tools that beat a "
+    "grep/symbol-tool baseline are available. get_architecture for orientation, fan-in hotspots, "
+    "layering, and module clustering; query_graph for whole-repo complexity ranking and "
+    "multi-hop structural patterns; detect_changes for diff-driven impact radius. For literal "
+    "text search, single-symbol lookup, call-chain tracing, or exact source, prefer your local "
+    "grep and symbol tools — they are faster and see non-symbol content. If the project is "
+    "missing or stale, refresh it out-of-band (cbm cli index_repository) instead of calling "
+    "indexing tools that are not in this surface. Check has_more or nextCursor and paginate "
+    "when present.";
+
 static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
                                                      cbm_mcp_tool_profile_t profile) {
     /* Determine protocol version: if client requests a version we support,
@@ -1391,6 +1393,8 @@ static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
         instructions = MCP_ANALYSIS_SERVER_INSTRUCTIONS;
     } else if (profile == CBM_MCP_TOOL_PROFILE_SCOUT) {
         instructions = MCP_SCOUT_SERVER_INSTRUCTIONS;
+    } else if (profile == CBM_MCP_TOOL_PROFILE_MINIMAL) {
+        instructions = MCP_MINIMAL_SERVER_INSTRUCTIONS;
     }
     yyjson_mut_obj_add_str(doc, root, "instructions", instructions);
 
@@ -1699,7 +1703,10 @@ cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path) {
         srv->store = cbm_store_open_memory();
     }
     srv->owns_store = true;
-    srv->tool_profile = CBM_MCP_TOOL_PROFILE_ALL;
+    /* Fork patch (fork issue #4): minimal agent surface by default — the three
+     * tools with no grep/codegraph equivalent. --tool-profile=all restores the
+     * full registry. */
+    srv->tool_profile = CBM_MCP_TOOL_PROFILE_MINIMAL;
     srv->background_tasks = true;
 
     return srv;
@@ -1709,6 +1716,106 @@ void cbm_mcp_server_set_tool_profile(cbm_mcp_server_t *srv, cbm_mcp_tool_profile
     if (srv) {
         srv->tool_profile = profile;
     }
+}
+
+/* ── tools/list visibility (fork issue #4) ──────────────────────── */
+
+/* Fork patch (fork issue #4): the `tools_disabled` config denylist hides a
+ * tool from tools/list AND fails loud on tools/call, on both the MCP and the
+ * CLI surface. srv may be NULL (registry-only callers) — no denylist then.
+ * Precedence: the project-local file (<session_root>/.cbm/config.json) first,
+ * then the global store. */
+static bool mcp_tool_disabled(const cbm_mcp_server_t *srv, const char *name) {
+    if (!srv || !name) {
+        return false;
+    }
+    if (srv->session_root[0] && cbm_config_local_tool_disabled(srv->session_root, name)) {
+        return true;
+    }
+    if (!srv->config) {
+        return false;
+    }
+    return cbm_config_tool_disabled(srv->config, name);
+}
+
+/* A tool is listed only when its profile allows it AND the denylist doesn't
+ * name it. One predicate so tools/list, per-tool help, and dispatch cannot
+ * drift apart again. */
+static bool mcp_tool_visible(const cbm_mcp_server_t *srv, const char *name) {
+    cbm_mcp_tool_profile_t profile = srv ? srv->tool_profile : CBM_MCP_TOOL_PROFILE_ALL;
+    return mcp_tool_allowed(profile, name) && !mcp_tool_disabled(srv, name);
+}
+
+static int mcp_visible_tool_count(const cbm_mcp_server_t *srv) {
+    int count = 0;
+    for (int i = 0; i < TOOL_COUNT; i++) {
+        if (mcp_tool_visible(srv, TOOLS[i].name)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static char *cbm_mcp_tools_list_range(const cbm_mcp_server_t *srv, int offset, int limit,
+                                      bool include_next_cursor) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+
+    yyjson_mut_val *tools = yyjson_mut_arr(doc);
+
+    if (offset < 0) {
+        offset = 0;
+    }
+    int allowed_count = mcp_visible_tool_count(srv);
+    if (offset > allowed_count) {
+        offset = allowed_count;
+    }
+    if (limit < 0 || limit > allowed_count) {
+        limit = allowed_count;
+    }
+
+    int end = offset + limit;
+    if (end > allowed_count) {
+        end = allowed_count;
+    }
+
+    int visible = 0;
+    for (int i = 0; i < TOOL_COUNT && visible < end; i++) {
+        if (!mcp_tool_visible(srv, TOOLS[i].name)) {
+            continue;
+        }
+        if (visible >= offset) {
+            mcp_add_tool_def(doc, tools, i);
+        }
+        visible++;
+    }
+
+    yyjson_mut_obj_add_val(doc, root, "tools", tools);
+    if (include_next_cursor && end < allowed_count) {
+        char cursor[32];
+        snprintf(cursor, sizeof(cursor), "%d", end);
+        yyjson_mut_obj_add_strcpy(doc, root, "nextCursor", cursor);
+    }
+
+    char *out = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    return out;
+}
+
+char *cbm_mcp_tools_list(void) {
+    return cbm_mcp_tools_list_range(NULL, 0, TOOL_COUNT, false);
+}
+
+static int mcp_tools_cursor_offset(const char *params_json, bool *has_cursor_out);
+
+static char *cbm_mcp_tools_list_page(const cbm_mcp_server_t *srv, const char *params_json) {
+    bool has_cursor = false;
+    int offset = mcp_tools_cursor_offset(params_json, &has_cursor);
+    if (!has_cursor) {
+        return cbm_mcp_tools_list_range(srv, 0, TOOL_COUNT, false);
+    }
+    return cbm_mcp_tools_list_range(srv, offset, MCP_TOOLS_PAGE_SIZE, true);
 }
 
 cbm_store_t *cbm_mcp_server_store(cbm_mcp_server_t *srv) {
@@ -12712,6 +12819,17 @@ static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const c
                  tool_name, mcp_tool_profile_name(srv->tool_profile));
         return cbm_mcp_text_result(message, true);
     }
+    /* Fork patch (fork issue #4): fail loud on denylisted tools — a hidden
+     * tool called by name must error explicitly, never join the silent-empty
+     * family. Also enforced client-side in the CLI for a fast rejection. */
+    if (mcp_tool_disabled(srv, tool_name)) {
+        char message[CBM_SZ_256];
+        snprintf(message, sizeof(message),
+                 "tool '%s' is disabled by config (tools_disabled; see `config set "
+                 "tools_disabled`)",
+                 tool_name);
+        return cbm_mcp_text_result(message, true);
+    }
 
     if (strcmp(tool_name, "list_projects") == 0) {
         return handle_list_projects(srv, args_json);
@@ -12854,14 +12972,15 @@ static void detect_session(cbm_mcp_server_t *srv) {
     }
 }
 
-/* auto_watch config: gates background watcher registration (default on).
- * Multi-project users can contain a session to its own project with
- * `config set auto_watch false`. */
+/* auto_watch config: gates background watcher registration (fork patch, fork
+ * issue #3: default OFF — a resident file watcher is the largest session-long
+ * resource consumer and is redundant under an explicit indexing workflow).
+ * Multi-project users can turn it on with `config set auto_watch true`. */
 static bool auto_watch_enabled(cbm_mcp_server_t *srv) {
     if (!srv->config) {
-        return true; /* default on */
+        return false; /* default off */
     }
-    return cbm_config_get_bool(srv->config, CBM_CONFIG_AUTO_WATCH, true);
+    return cbm_config_get_bool(srv->config, CBM_CONFIG_AUTO_WATCH, false);
 }
 
 /* Register the session project with the background watcher for ongoing
@@ -13124,7 +13243,7 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     } else if (strcmp(req.method, "prompts/get") == 0) {
         result_json = cbm_mcp_prompt_get(req.params_raw, &request_error_json);
     } else if (strcmp(req.method, "tools/list") == 0) {
-        result_json = cbm_mcp_tools_list_page(srv->tool_profile, req.params_raw);
+        result_json = cbm_mcp_tools_list_page(srv, req.params_raw);
     } else if (strcmp(req.method, "tools/call") == 0) {
         char *tool_name = req.params_raw ? cbm_mcp_get_tool_name(req.params_raw) : NULL;
         char *tool_args =

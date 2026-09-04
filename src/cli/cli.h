@@ -420,9 +420,40 @@ int cbm_config_set(cbm_config_t *cfg, const char *key, const char *value);
 /* Delete a config key. Returns 0 on success. */
 int cbm_config_delete(cbm_config_t *cfg, const char *key);
 
+/* Fork patch (fork issue #4): `tools_disabled` — a comma-separated denylist of
+ * tool names. Named tools vanish from MCP tools/list and help surfaces and
+ * fail loud (non-zero exit, explicit message) when called by name on either
+ * the MCP or the CLI surface. Preset profiles remain the coarse knob; this is
+ * the fine-grained override. */
+#define CBM_CONFIG_TOOLS_DISABLED "tools_disabled"
+
+/* Pure predicate: does `csv` (a comma-separated list, whitespace tolerated)
+ * name `tool_name`? NULL/empty csv → false. Exported so help rendering and
+ * dispatch share one parser. */
+bool cbm_config_tool_csv_contains(const char *csv, const char *tool_name);
+
+/* Convenience read: true when `tool_name` is named by the cfg's
+ * tools_disabled value. NULL cfg → false (no store, no policy). */
+bool cbm_config_tool_disabled(cbm_config_t *cfg, const char *tool_name);
+
+/* Read tools_disabled WITHOUT creating the store: returns a heap copy of the
+ * raw CSV value, or NULL when unset/unreadable. For early surfaces (top-level
+ * --help) that must not have db-creation side effects. Project-local override
+ * first: <cwd>/.cbm/config.json, then the global store. Caller frees. */
+char *cbm_config_tools_disabled_readonly(void);
+
+/* Fork patch: does the project-local config file `<dir>/.cbm/config.json`
+ * denylist `tool_name`? Missing file / missing key → false; corrupt file →
+ * warn + false (same as the store-less case). The MCP side passes the
+ * session root; the CLI passes its working directory. */
+bool cbm_config_local_tool_disabled(const char *dir, const char *tool_name);
+
 /* Well-known config keys */
 #define CBM_CONFIG_AUTO_INDEX "auto_index"
 #define CBM_CONFIG_AUTO_INDEX_LIMIT "auto_index_limit"
+/* Fork patch (fork issue #3): default OFF — a resident watcher is the largest
+ * session-long resource consumer and is redundant under an explicit indexing
+ * workflow. Opt in with `config set auto_watch true`. */
 #define CBM_CONFIG_AUTO_WATCH "auto_watch"
 #define CBM_CONFIG_UI_LANG "ui-lang"
 #define CBM_CONFIG_WATCHER_ENABLED "watcher_enabled"

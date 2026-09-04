@@ -185,6 +185,14 @@ static void mem_option_set_verified(mi_option_t option, long value, const char *
 #define RAM_FRACTION_32GB 0.35
 #define RAM_BYTES_PER_GB (1024ULL * 1024 * 1024)
 
+/* Fork patch (fork issue #3): the fraction-derived default budget is capped.
+ * Upstream's bare fraction (25%/35%/50% of RAM) handed an 11.4GB budget on a
+ * 32GB machine with no opt-out — greed the leak record (#832, #1084, #45,
+ * #1654) does not justify. 2048MB covers the observed working set with head
+ * room; CBM_MEM_BUDGET_MB remains the explicit way UP (a lower explicit value
+ * still wins, as before). */
+#define MEM_BUDGET_DEFAULT_CAP_BYTES (2048ULL * 1024 * 1024)
+
 double cbm_mem_ram_fraction_for_total(size_t total_ram_bytes) {
     if (total_ram_bytes <= 16ULL * RAM_BYTES_PER_GB) {
         return RAM_FRACTION_16GB;
@@ -206,10 +214,19 @@ cbm_mem_budget_t cbm_mem_resolve_budget(size_t total_ram, double ram_fraction,
         .clamped = false,
         .invalid = false,
         .hard_capped = false,
+        .default_capped = false,
     };
+    /* Fork patch (fork issue #3): cap the fraction-derived default. Only the
+     * DEFAULT is capped here — an explicit CBM_MEM_BUDGET_MB override below
+     * may still exceed the cap (up to the total-RAM clamp). */
+    if (result.budget > MEM_BUDGET_DEFAULT_CAP_BYTES) {
+        result.budget = (size_t)MEM_BUDGET_DEFAULT_CAP_BYTES;
+        result.source = "default_cap";
+        result.default_capped = true;
+    }
 
     if (budget_mb == NULL || budget_mb[0] == '\0') {
-        return result; /* no override → fraction-derived budget */
+        return result; /* no override → capped fraction-derived budget */
     }
 
     /* Strict parse, matching the src/foundation/limits.c convention: reject
@@ -225,6 +242,7 @@ cbm_mem_budget_t cbm_mem_resolve_budget(size_t total_ram, double ram_fraction,
     }
 
     result.source = "CBM_MEM_BUDGET_MB";
+    result.default_capped = false; /* explicit override won — the cap did not fire */
     size_t want = (size_t)want_mb;
     if (total_ram > 0) {
         /* Compare in MiB space so a valid-but-huge request (e.g. 2^44 MiB, which
@@ -430,6 +448,13 @@ void cbm_mem_init_with_cap(double ram_fraction, size_t hard_cap_bytes) {
         char cap_bytes[CBM_SZ_32];
         snprintf(cap_bytes, sizeof(cap_bytes), "%zu", hard_cap_bytes);
         cbm_log_info("mem.budget.worker_cap", "cap_bytes", cap_bytes);
+    }
+    if (resolved.default_capped) {
+        char cap_mb[CBM_SZ_32];
+        snprintf(cap_mb, sizeof(cap_mb), "%zu",
+                 (size_t)(MEM_BUDGET_DEFAULT_CAP_BYTES / MB_DIVISOR));
+        cbm_log_info("mem.budget.default_cap", "cap_mb", cap_mb, "hint",
+                     "set CBM_MEM_BUDGET_MB to raise");
     }
 
     char budget_mb[CBM_SZ_32];

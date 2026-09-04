@@ -23,7 +23,11 @@
  * Relaxed ordering is the right level: each is an independent scalar with no
  * happens-before relationship to publish alongside it, and the log path must
  * stay cheap enough that nobody is tempted to route around it. */
-static _Atomic CBMLogLevel g_log_level = CBM_LOG_INFO;
+/* Fork patch (fork issue #3): default level is ERROR. INFO was the upstream
+ * default, but warn-level allocator chatter hit CLI stderr on every cold
+ * start, and a single-user local tool has no business being chatty by
+ * default. CBM_LOG_LEVEL (textual or numeric) still overrides; #414. */
+static _Atomic CBMLogLevel g_log_level = CBM_LOG_ERROR;
 static _Atomic CBMLogFormat g_log_format = CBM_LOG_FORMAT_TEXT;
 /* Cast, not bare NULL: NULL is ((void*)0) and the implicit void*-to-
  * function-pointer conversion is not a compile-time constant, which

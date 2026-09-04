@@ -87,8 +87,43 @@ Current keys:
 |---|---|---|
 | `auto_index` | `false` | Automatically index new projects when an MCP session starts. |
 | `auto_index_limit` | `50000` | Maximum file count allowed for automatic indexing of a new project. |
-| `auto_watch` | `true` | Register the session's project with the background git watcher on connect. Set `false` to keep a session from registering its project (the watcher still runs for other projects). |
+| `auto_watch` | `false` | Register the session's project with the background git watcher on connect. Fork patch: **default `false`** — a resident file watcher is the largest session-long resource consumer and is redundant under an explicit indexing workflow (SessionStart hook / CI). Set `true` to restore upstream behavior (the watcher still runs for other projects). |
 | `watcher_enabled` | `true` | Master switch for the background watcher subsystem. Set `false` to stop the watcher from starting at all — no poll thread and no project registration. Reindex manually with `index_repository` when disabled. |
+| `tools_disabled` | *(empty)* | Fork patch: comma-separated denylist of tool names, e.g. `search_graph,trace_path,get_code_snippet`. Named tools are omitted from MCP `tools/list` and from `--help` tool lists, and fail loud (non-zero exit, explicit "disabled by config" message) when called by name — on both the MCP and the CLI surface. Names are validated at `config set` time against the tool registry. |
+
+### Tool profiles
+
+`--tool-profile` selects how many tools the MCP server advertises:
+
+| Profile | Tools |
+|---|---|
+| `all` | The full registry. |
+| `minimal` *(fork default)* | `get_architecture`, `query_graph`, `detect_changes` only — the three tools that survive side-by-side comparison with a grep + symbol-tool baseline (architecture overview, whole-repo complexity ranking, diff-driven impact radius). Everything else duplicates what local tools already do, with a cold-start penalty. |
+| `analysis` | Read-only inspection subset. |
+| `scout` | Fast positive-discovery subset. |
+
+`tools_disabled` composes with the profile: a tool must pass the profile's
+allowlist *and* not be denylisted to be visible or callable. The default
+changed in the fork — upstream defaulted to `all`; pass `--tool-profile=all`
+explicitly to restore it.
+
+### Project-local config file (fork)
+
+A checkout can carry its own policy in `.cbm/config.json` (relative to the
+CLI's working directory, or the MCP session root):
+
+```json
+{
+  "tools_disabled": "search_graph,trace_path,get_code_snippet"
+}
+```
+
+- Keys mirror the `config` subcommand; precedence is **local file >
+  `_config.db` > built-in default**.
+- Currently consumed for `tools_disabled` on both the MCP and CLI surfaces.
+- A missing file is a no-op. A file that exists but is unreadable or invalid
+  JSON is logged (`config.local.corrupt` / `config.local.unreadable`) and
+  ignored — stdout (MCP JSON-RPC, help output) is never polluted.
 
 > **`watcher_enabled` vs `auto_watch`.** `watcher_enabled` controls whether the
 > watcher *subsystem* starts at all (the background poll thread). `auto_watch` is
@@ -135,7 +170,7 @@ Current format:
 
 Notes:
 
-- If a UI-enabled binary finds its verified external asset pack and no UI config file exists yet, the UI auto-enables on first run. Missing or invalid assets leave the MCP/daemon service available and keep the UI disabled.
+- Fork patch: the UI no longer auto-enables on first run. A UI-enabled binary used to turn the loopback HTTP listener on whenever no UI config file existed yet; now the UI stays off until explicitly enabled (`config set ui_enabled true` or `--ui=true`). Missing or invalid assets leave the MCP/daemon service available and keep the UI disabled.
 - `CBM_CACHE_DIR` changes both the UI config location and the runtime settings database location.
 - CBM resolves `CBM_CACHE_DIR` to one canonical per-account cache root. A process configured with a different root fails while any CBM session or command is active; close them before switching roots.
 
@@ -149,8 +184,9 @@ These environment variables affect runtime behavior:
 | `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | Override the cache directory used for indexes, `_config.db`, and UI `config.json`. |
 | `CBM_DIAGNOSTICS` | `false` | Enable periodic `snapshot.json` and retained `trajectory.ndjson` below a fresh owner-private directory in the system temp directory. The daemon records the randomized paths in the `diagnostics.start` discovery record (a single JSON line) in `${CBM_CACHE_DIR}/logs/cbm-daemon.log`; that one record is emitted even when `CBM_LOG_LEVEL` suppresses ordinary logging, so the paths always remain discoverable. |
 | `CBM_DOWNLOAD_URL` | GitHub releases | Override the update download URL. |
-| `CBM_LOG_LEVEL` | `info` | Set the log level to `debug`, `info`, `warn`, `error`, or `none` (or `0`-`4`). Thin-frontend messages use that session's stderr; detached daemon events use `${CBM_CACHE_DIR}/logs/cbm-daemon.log`. |
+| `CBM_LOG_LEVEL` | `error` | Set the log level to `debug`, `info`, `warn`, `error`, or `none` (or `0`-`4`). Fork patch: default changed from `info` to `error` — warn-level allocator chatter hit CLI stderr on every cold start of a single-user local tool. Thin-frontend messages use that session's stderr; detached daemon events use `${CBM_CACHE_DIR}/logs/cbm-daemon.log`. |
 | `CBM_RUNTIME_DIR` | `%LOCALAPPDATA%` (Windows), `/private/tmp` (macOS), `/tmp` (other) | Parent directory for the daemon/CLI rendezvous directory, which CBM creates inside it as `cbm-daemon-<uid>` (`cbm-daemon-<key>` on Windows). Set it when the default ancestry cannot pass the private-directory check — see below. `CBM_CACHE_DIR` does **not** move the rendezvous. |
+| `CBM_SKIP_DACL_HARDENING` | *(unset)* | Windows only, fork patch: set to `1` to skip the cache-directory untrusted-ACE walk (the "cache-private / DACL entry grants mutation rights to untrusted identity" startup refusal) on hosts where an ancestor ACL outside your control cannot be fixed. Owner validation stays active; this is a deliberate fail-open the operator opts into. Env-only by design: the config store lives inside the cache directory, so a config key cannot affect the first run that creates it. Not recommended on multi-user or terminal-server hosts. |
 | `CBM_WORKERS` | auto-detected | Override the indexing worker count. |
 
 ### Relocating the daemon rendezvous directory

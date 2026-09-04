@@ -82,6 +82,11 @@ const char *cbm_mcp_tool_description(const char *tool_name);
  * text cannot drift from tools/list (#1361). Heap-allocated; caller frees. */
 char *cbm_mcp_tools_help_list(void);
 
+/* Fork patch (fork issue #4): same block, but tools named in the
+ * tools_disabled denylist CSV are omitted — help must not advertise what the
+ * config forbids. */
+char *cbm_mcp_tools_help_list_filtered(const char *disabled_csv);
+
 /* Format the initialize response. params_json is the raw initialize params
  * (used for protocol version negotiation). Returns heap-allocated JSON. */
 char *cbm_mcp_initialize_response(const char *params_json);
@@ -115,10 +120,16 @@ typedef enum {
      * write, so these are intentionally not named strictly read-only modes. */
     CBM_MCP_TOOL_PROFILE_ANALYSIS = 1,
     CBM_MCP_TOOL_PROFILE_SCOUT = 2,
+    /* Fork patch (fork issue #4): the default agent surface. Only the three
+     * tools that beat the grep/codegraph baseline in side-by-side trials are
+     * advertised: get_architecture, query_graph, detect_changes. Pass
+     * --tool-profile=all to restore the full surface explicitly. */
+    CBM_MCP_TOOL_PROFILE_MINIMAL = 3,
 } cbm_mcp_tool_profile_t;
 
 /* Parse the process-level tool-profile flag. Explicit malformed or unknown
- * values fail closed with -1; absence selects the full default surface. */
+ * values fail closed with -1; absence selects the minimal default surface
+ * (fork patch), not the full one. */
 int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
                                     cbm_mcp_tool_profile_t *profile_out);
 

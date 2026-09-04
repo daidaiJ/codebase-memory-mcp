@@ -6736,6 +6736,152 @@ void cbm_config_close(cbm_config_t *cfg) {
     free(cfg);
 }
 
+/* ── tools_disabled (fork issue #4) ───────────────────────────── */
+
+bool cbm_config_tool_csv_contains(const char *csv, const char *tool_name) {
+    if (!csv || !tool_name || csv[0] == '\0') {
+        return false;
+    }
+    size_t name_len = strlen(tool_name);
+    const char *p = csv;
+    while (*p != '\0') {
+        while (*p == ' ' || *p == '\t' || *p == ',') {
+            p++;
+        }
+        const char *start = p;
+        while (*p != '\0' && *p != ',') {
+            p++;
+        }
+        const char *end = p; /* trailing whitespace trimmed below */
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+            end--;
+        }
+        if ((size_t)(end - start) == name_len && strncmp(start, tool_name, name_len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool cbm_config_tool_disabled(cbm_config_t *cfg, const char *tool_name) {
+    if (!cfg || !tool_name) {
+        return false;
+    }
+    const char *csv = cbm_config_get(cfg, CBM_CONFIG_TOOLS_DISABLED, "");
+    return cbm_config_tool_csv_contains(csv, tool_name);
+}
+
+/* ── Local project config (fork): <dir>/.cbm/config.json ───────── */
+
+/* Fork patch (fork issue #4): a checkout can carry its own policy. The file
+ * is a JSON object using the same keys as the `config` subcommand; for
+ * tools_disabled the value is the same comma-separated CSV as the store's.
+ * A file that exists but cannot be read or parsed is warned about and
+ * IGNORED — matching the corrupt-UI-config behavior in ui/config.c. Run with
+ * CBM_LOG_LEVEL=warn to see the warning; stdout stays clean either way. */
+static bool local_config_file_get(const char *dir, const char *key, char *out, size_t out_sz) {
+    if (!dir || !dir[0] || !key || !out || out_sz == 0) {
+        return false;
+    }
+    char path[CLI_BUF_1K];
+    int written = snprintf(path, sizeof(path), "%s/.cbm/config.json", dir);
+    if (written <= 0 || (size_t)written >= sizeof(path)) {
+        return false;
+    }
+    if (!cbm_file_exists(path)) {
+        return false;
+    }
+    FILE *file = cbm_fopen(path, "rb");
+    if (!file) {
+        cbm_log_warn("config.local.unreadable", "path", path);
+        return false;
+    }
+    /* Local policy files are hand-written; a generous-but-bounded cap keeps a
+     * runaway file from being slurped into memory. */
+    char *buffer = NULL;
+    size_t length = 0;
+    if (fseek(file, 0, SEEK_END) == 0) {
+        long file_length = ftell(file);
+        if (file_length > 0 && file_length <= 64 * 1024 && fseek(file, 0, SEEK_SET) == 0) {
+            buffer = malloc((size_t)file_length + 1U);
+            if (buffer && fread(buffer, 1, (size_t)file_length, file) == (size_t)file_length) {
+                length = (size_t)file_length;
+            } else {
+                free(buffer);
+                buffer = NULL;
+            }
+        }
+    }
+    (void)fclose(file);
+    if (!buffer) {
+        cbm_log_warn("config.local.unreadable", "path", path);
+        return false;
+    }
+    buffer[length] = '\0';
+
+    yyjson_doc *doc = yyjson_read(buffer, length, 0);
+    free(buffer);
+    if (!doc) {
+        cbm_log_warn("config.local.corrupt", "path", path);
+        return false;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    if (!yyjson_is_obj(root)) {
+        cbm_log_warn("config.local.corrupt", "path", path);
+        yyjson_doc_free(doc);
+        return false;
+    }
+    yyjson_val *value = yyjson_obj_get(root, key);
+    bool found = false;
+    if (value && yyjson_is_str(value)) {
+        snprintf(out, out_sz, "%s", yyjson_get_str(value));
+        found = true;
+    } else if (value && yyjson_is_bool(value)) {
+        snprintf(out, out_sz, "%s", yyjson_get_bool(value) ? "true" : "false");
+        found = true;
+    } else if (value && yyjson_is_int(value)) {
+        snprintf(out, out_sz, "%d", yyjson_get_int(value));
+        found = true;
+    }
+    yyjson_doc_free(doc);
+    return found;
+}
+
+bool cbm_config_local_tool_disabled(const char *dir, const char *tool_name) {
+    char csv[CLI_BUF_4K];
+    return local_config_file_get(dir, CBM_CONFIG_TOOLS_DISABLED, csv, sizeof(csv)) &&
+           cbm_config_tool_csv_contains(csv, tool_name);
+}
+
+char *cbm_config_tools_disabled_readonly(void) {
+    /* Fork: the project-local file wins over the global store — a checkout
+     * can carry its own denylist. CWD is the CLI's working project. */
+    char cwd[CLI_BUF_1K];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        char csv[CLI_BUF_4K];
+        if (local_config_file_get(cwd, CBM_CONFIG_TOOLS_DISABLED, csv, sizeof(csv))) {
+            return cbm_strdup(csv);
+        }
+    }
+    char cache_dir[CLI_BUF_1K];
+    snprintf(cache_dir, sizeof(cache_dir), "%s", cbm_resolve_cache_dir());
+    char dbpath[CLI_BUF_1K];
+    snprintf(dbpath, sizeof(dbpath), "%s/_config.db", cache_dir);
+    /* Read-only by contract: callers (top-level --help) run before any daemon
+     * bootstrap and must not create the store as a side effect of asking. */
+    if (!cbm_file_exists(dbpath)) {
+        return NULL;
+    }
+    cbm_config_t *cfg = cbm_config_open(cache_dir);
+    if (!cfg) {
+        return NULL;
+    }
+    const char *csv = cbm_config_get(cfg, CBM_CONFIG_TOOLS_DISABLED, "");
+    char *out = (csv && csv[0] != '\0') ? cbm_strdup(csv) : NULL;
+    cbm_config_close(cfg);
+    return out;
+}
+
 const char *cbm_config_get(cbm_config_t *cfg, const char *key, const char *default_val) {
     static CBM_TLS char result_buf[CLI_BUF_4K];
     if (!cfg || !key) {
@@ -6849,12 +6995,19 @@ typedef struct {
 static const config_key_def_t CONFIG_KEYS[] = {
     {CBM_CONFIG_AUTO_INDEX, "false", "Enable auto-indexing on MCP session start"},
     {CBM_CONFIG_AUTO_INDEX_LIMIT, "50000", "Max files for auto-indexing new projects"},
-    {CBM_CONFIG_AUTO_WATCH, "true", "Register background git watcher on session connect"},
+    /* Fork patch (fork issue #3): auto_watch defaults OFF — a resident file
+     * watcher is the largest session-long resource consumer and is redundant
+     * under an explicit indexing workflow (SessionStart hook / CI). */
+    {CBM_CONFIG_AUTO_WATCH, "false", "Register background git watcher on session connect"},
     {CBM_CONFIG_WATCHER_ENABLED, "true",
      "Run the background watcher thread (auto-reindex); false to disable"},
     {CBM_CONFIG_UI_LANG, "auto", "Pin graph UI language: en, zh, or auto"},
     {CBM_CONFIG_UI_ENABLED, "false", "Serve the graph UI on a loopback HTTP port"},
     {CBM_CONFIG_UI_PORT, "9749", "Port for the graph UI listener when enabled"},
+    /* Fork patch (fork issue #4): comma-separated denylist; named tools vanish
+     * from tools/list + help and fail loud when called by name. */
+    {CBM_CONFIG_TOOLS_DISABLED, "",
+     "Comma-separated tools to hide and reject (e.g. search_graph,trace_path)"},
 };
 
 /* #1558: ui_enabled and ui_port were reachable ONLY by hand-editing
@@ -6878,6 +7031,47 @@ const char *cbm_cli_config_key_at_for_testing(size_t index) {
 
 static bool config_key_is_ui(const char *key) {
     return key && (strcmp(key, CBM_CONFIG_UI_ENABLED) == 0 || strcmp(key, CBM_CONFIG_UI_PORT) == 0);
+}
+
+/* Fork patch (fork issue #4): fail loud on denylist typos. An entry that
+ * matches no registry tool would silently never fire — the exact silent-empty
+ * failure mode this patch series is eliminating. Empty tokens are tolerated
+ * (the dispatch predicate skips them too); unknown names are not. */
+static bool config_tools_disabled_value_valid(const char *value, char *bad_out, size_t bad_sz) {
+    if (!value) {
+        return false;
+    }
+    const char *p = value;
+    while (*p != '\0') {
+        while (*p == ' ' || *p == '\t' || *p == ',') {
+            p++;
+        }
+        const char *start = p;
+        while (*p != '\0' && *p != ',') {
+            p++;
+        }
+        const char *end = p;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+            end--;
+        }
+        size_t len = (size_t)(end - start);
+        if (len == 0) {
+            continue;
+        }
+        bool known = false;
+        for (int i = 0; i < cbm_mcp_tool_count(); i++) {
+            const char *name = cbm_mcp_tool_name(i);
+            if (name && strlen(name) == len && strncmp(name, start, len) == 0) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            snprintf(bad_out, bad_sz, "%.*s", (int)len, start);
+            return false;
+        }
+    }
+    return true;
 }
 
 static void config_ui_read(const char *key, char *out, size_t out_sz) {
@@ -7014,6 +7208,23 @@ int cbm_cmd_config(int argc, char **argv) {
                 printf("%s = %s\n", argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN]);
                 printf("  (restart the daemon for this to take effect)\n");
             } else {
+                rc = CLI_TRUE;
+            }
+        } else if (strcmp(argv[CLI_SKIP_ONE], CBM_CONFIG_TOOLS_DISABLED) == 0) {
+            char bad_name[CBM_SZ_128];
+            if (!config_tools_disabled_value_valid(argv[CLI_PAIR_LEN], bad_name,
+                                                   sizeof(bad_name))) {
+                (void)fprintf(stderr,
+                              "error: unknown tool '%s' in tools_disabled — names must match the "
+                              "Tools list printed by --help\n",
+                              bad_name);
+                rc = CLI_TRUE;
+            } else if (cbm_config_set(cfg, argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN]) == 0) {
+                printf("%s = %s\n", argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN]);
+                printf("  (new MCP sessions pick this up on connect; running agents re-list "
+                       "tools per session)\n");
+            } else {
+                (void)fprintf(stderr, "error: failed to set %s\n", argv[CLI_SKIP_ONE]);
                 rc = CLI_TRUE;
             }
         } else {

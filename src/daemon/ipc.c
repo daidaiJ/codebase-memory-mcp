@@ -4108,6 +4108,21 @@ static DWORD win_private_mutation_rights(void) {
            DELETE | WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY;
 }
 
+/* Fork patch (fork issue #2): CBM_SKIP_DACL_HARDENING=1 opts out of the
+ * cache-directory ACL walk on Windows. On hosts where an ancestor ACL outside
+ * the user's control (a managed profile or harness directory leaking an
+ * inherited Users / Authenticated Users ACE) fails the cache-private check,
+ * the CLI/MCP refuses to start at all and only an invasive `icacls` reset on
+ * a shared parent directory fixes it. The env switch is fail-open BY
+ * REQUEST: ownership validation (win_file_owner_secure) still applies, and
+ * the operator explicitly owns the relaxed local trust boundary. Deliberately
+ * env-only — the config store lives inside the cache directory, so a config
+ * key cannot affect the first run that creates it. */
+static bool win_dacl_hardening_skipped(void) {
+    const char *skip = getenv("CBM_SKIP_DACL_HARDENING");
+    return skip != NULL && strcmp(skip, "1") == 0;
+}
+
 static bool win_file_acl_secure(win_security_t *security, HANDLE file, DWORD mutation,
                                 bool ancestor) {
     PACL dacl = NULL;
@@ -4119,6 +4134,15 @@ static bool win_file_acl_secure(win_security_t *security, HANDLE file, DWORD mut
     bool secure =
         status == ERROR_SUCCESS && descriptor && dacl && security->is_valid_acl(dacl) &&
         security->get_acl_information(dacl, &information, sizeof(information), AclSizeInformation);
+    if (secure && win_dacl_hardening_skipped()) {
+        /* Accept the OS-default DACL without the untrusted-grant walk: the
+         * owner-only one-ACE shape is no longer demanded. The owner is still
+         * validated by win_file_owner_secure at the caller. */
+        if (descriptor) {
+            (void)LocalFree(descriptor);
+        }
+        return true;
+    }
     enum {
         WIN_FILE_ACE_ALLOW = 0x00,
         WIN_FILE_ACE_DENY = 0x01,

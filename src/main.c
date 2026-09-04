@@ -8,7 +8,7 @@
  *   --help          Print usage and exit
  *   --ui=true/false Enable/disable HTTP UI server (persisted)
  *   --port=N        Set HTTP UI port (persisted, default 9749)
- *   --tool-profile=analysis|scout  Expose a restricted agent tool surface
+ *   --tool-profile=all|minimal|analysis|scout  Tool surface (fork default: minimal)
  *
  * Long-lived MCP and hook frontends are thin clients of one mandatory
  * per-account daemon. One-shot CLI tool calls run in an isolated local server
@@ -671,6 +671,17 @@ static int run_cli(int argc, char **argv, cbm_project_lock_manager_t *project_lo
                    main_local_maintenance_context_t *maintenance_context) {
     if (argc == 1 && argv && (strcmp(argv[0], "--help") == 0 || strcmp(argv[0], "-h") == 0)) {
         (void)fputs(CLI_USAGE, stdout);
+        /* Fork patch (fork issue #4): list the callable tools, minus any
+         * tools_disabled entries — an agent reading help must not see names
+         * it would only get rejected for. */
+        char *disabled_csv = cbm_config_tools_disabled_readonly();
+        char *tools_help = cbm_mcp_tools_help_list_filtered(disabled_csv);
+        free(disabled_csv);
+        if (tools_help) {
+            (void)fprintf(stdout, "\n%s", tools_help);
+            free(tools_help);
+            (void)fprintf(stdout, "\nPer-tool flags: codebase-memory-mcp cli <tool> --help\n");
+        }
         return 0;
     }
     if (argc < MAIN_MIN_ARGC) {
@@ -705,6 +716,24 @@ static int run_cli(int argc, char **argv, cbm_project_lock_manager_t *project_lo
     const char *tool_name = argv[0];
     int rem_argc = argc - SKIP_ONE; /* args following the tool name */
     char **rem_argv = argv + SKIP_ONE;
+
+    /* Fork patch (fork issue #4): fail loud BEFORE any daemon bootstrap or
+     * per-tool help — a disabled tool must fail as policy, not look broken.
+     * Internal index workers are exempt: they run the registry, not user
+     * intent (disabling index_repository while auto-index is on is already
+     * contradictory, and the daemon-side dispatch check still applies). */
+    if (!index_worker) {
+        char *disabled_csv = cbm_config_tools_disabled_readonly();
+        bool disabled = cbm_config_tool_csv_contains(disabled_csv, tool_name);
+        free(disabled_csv);
+        if (disabled) {
+            (void)fprintf(stderr,
+                          "error: tool '%s' is disabled by config (tools_disabled; see "
+                          "`config set tools_disabled`)\n",
+                          tool_name);
+            return SKIP_ONE;
+        }
+    }
 
     /* --help / -h : print per-tool help (from the tool's input_schema) and exit
      * before any server work. */
@@ -913,7 +942,9 @@ static void print_help(void) {
     printf("  --ui=true    Enable HTTP graph visualization (persisted)\n");
     printf("  --ui=false   Disable HTTP graph visualization (persisted)\n");
     printf("  --port=N     Set UI port (default 9749, persisted)\n");
-    printf("  --tool-profile=analysis|scout  Expose a restricted inspection surface\n");
+    printf("  --tool-profile=all|minimal|analysis|scout\n");
+    printf("               Tool surface; fork default 'minimal' (get_architecture,\n");
+    printf("               query_graph, detect_changes only)\n");
     printf("\nSupported automatic/conditional client surfaces (45):\n");
     printf("  Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode,\n");
     printf("  Antigravity, Aider, KiloCode, VS Code, Cursor, Windsurf,\n");
@@ -930,8 +961,12 @@ static void print_help(void) {
     printf("  Plandex, SWE-agent, BLACKBOX, GitHub cloud agents, Jules,\n");
     printf("  CodeRabbit.\n");
     /* Rendered from the MCP tool registry: a hand-maintained copy here
-     * omitted check_index_coverage (#1361) and could silently drift again. */
-    char *tools_help = cbm_mcp_tools_help_list();
+     * omitted check_index_coverage (#1361) and could silently drift again.
+     * Fork patch (fork issue #4): tools_disabled entries are omitted, so help
+     * never advertises what the config forbids. */
+    char *disabled_csv = cbm_config_tools_disabled_readonly();
+    char *tools_help = cbm_mcp_tools_help_list_filtered(disabled_csv);
+    free(disabled_csv);
     if (tools_help) {
         printf("\n%s", tools_help);
         free(tools_help);
@@ -2476,11 +2511,15 @@ int main(int argc, char **argv) {
     cbm_profile_init();
     cbm_log_init_from_env();
 
-    cbm_mcp_tool_profile_t tool_profile = CBM_MCP_TOOL_PROFILE_ALL;
+    /* Fork patch (fork issue #4): the MCP agent surface defaults to minimal;
+     * cbm_mcp_parse_tool_profile_args owns the default (and --tool-profile=all
+     * restores the full registry). */
+    cbm_mcp_tool_profile_t tool_profile = CBM_MCP_TOOL_PROFILE_MINIMAL;
     if (role == CBM_DAEMON_PROCESS_MCP_CLIENT &&
         cbm_mcp_parse_tool_profile_args(argc, (const char *const *)argv, &tool_profile) != 0) {
-        (void)fprintf(stderr, "codebase-memory-mcp: --tool-profile requires the supported value "
-                              "'analysis' or 'scout'\n");
+        (void)fprintf(stderr,
+                      "codebase-memory-mcp: --tool-profile requires a supported value "
+                      "('all', 'minimal', 'analysis', or 'scout')\n");
         return 2;
     }
     const char *hook_event = NULL;

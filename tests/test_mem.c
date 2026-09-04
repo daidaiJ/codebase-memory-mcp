@@ -465,23 +465,44 @@ TEST(mem_init_second_call_noop) {
 #define CBM_TEST_MB ((size_t)1024 * 1024)
 
 TEST(resolve_budget_no_override_uses_fraction) {
-    /* No env override → ram_fraction × total_ram, source=ram_fraction. */
+    /* No env override → ram_fraction × total_ram, capped at 2048 MiB (fork
+     * patch, fork issue #3): 8 GiB × 0.5 = 4 GiB hits the cap. */
     size_t total = 8192 * CBM_TEST_MB;
     cbm_mem_budget_t r = cbm_mem_resolve_budget(total, 0.5, NULL);
-    ASSERT_EQ(r.budget, 4096 * CBM_TEST_MB);
-    ASSERT_STR_EQ(r.source, "ram_fraction");
+    ASSERT_EQ(r.budget, 2048 * CBM_TEST_MB);
+    ASSERT_STR_EQ(r.source, "default_cap");
+    ASSERT_TRUE(r.default_capped);
     ASSERT_FALSE(r.clamped);
     ASSERT_FALSE(r.invalid);
+    /* 0.25 × 8 GiB = exactly the cap — the cap does not fire. */
     ASSERT_EQ(cbm_mem_resolve_budget(total, 0.25, "").budget, 2048 * CBM_TEST_MB);
+    ASSERT_STR_EQ(cbm_mem_resolve_budget(total, 0.25, "").source, "ram_fraction");
     PASS();
 }
 
 TEST(resolve_budget_invalid_fraction_defaults) {
-    /* Out-of-range fractions fall back to the 0.5 default. */
+    /* Out-of-range fractions fall back to the 0.5 default (then the fork's
+     * 2048 MiB default cap). */
     size_t total = 8192 * CBM_TEST_MB;
-    ASSERT_EQ(cbm_mem_resolve_budget(total, 0.0, NULL).budget, 4096 * CBM_TEST_MB);
-    ASSERT_EQ(cbm_mem_resolve_budget(total, -1.0, NULL).budget, 4096 * CBM_TEST_MB);
-    ASSERT_EQ(cbm_mem_resolve_budget(total, 1.5, NULL).budget, 4096 * CBM_TEST_MB);
+    ASSERT_EQ(cbm_mem_resolve_budget(total, 0.0, NULL).budget, 2048 * CBM_TEST_MB);
+    ASSERT_EQ(cbm_mem_resolve_budget(total, -1.0, NULL).budget, 2048 * CBM_TEST_MB);
+    ASSERT_EQ(cbm_mem_resolve_budget(total, 1.5, NULL).budget, 2048 * CBM_TEST_MB);
+    PASS();
+}
+
+/* Fork patch (fork issue #3): only the DEFAULT is capped; an explicit
+ * CBM_MEM_BUDGET_MB override may still exceed the cap (up to total_ram). */
+TEST(resolve_budget_default_cap_exemption) {
+    size_t total = 32768 * CBM_TEST_MB;
+    /* 32 GiB × 0.5 = 16 GiB → capped. */
+    cbm_mem_budget_t r = cbm_mem_resolve_budget(total, 0.5, NULL);
+    ASSERT_EQ(r.budget, 2048 * CBM_TEST_MB);
+    ASSERT_TRUE(r.default_capped);
+    /* Override raises above the cap; the cap flag must clear. */
+    cbm_mem_budget_t raised = cbm_mem_resolve_budget(total, 0.5, "6144");
+    ASSERT_EQ(raised.budget, 6144 * CBM_TEST_MB);
+    ASSERT_STR_EQ(raised.source, "CBM_MEM_BUDGET_MB");
+    ASSERT_FALSE(raised.default_capped);
     PASS();
 }
 
@@ -545,10 +566,11 @@ TEST(resolve_budget_worker_cap_preserves_lower_user_override) {
 
 TEST(resolve_budget_invalid_override_falls_back) {
     /* Non-numeric, zero, negative, trailing-garbage, and ERANGE-overflow
-     * overrides are all rejected (invalid=true) → fraction budget, source
-     * stays ram_fraction. Strict parse matches src/foundation/limits.c. */
+     * overrides are all rejected (invalid=true) → capped fraction budget,
+     * source stays default_cap (the cap fired before the bad parse).
+     * Strict parse matches src/foundation/limits.c. */
     size_t total = 8192 * CBM_TEST_MB;
-    size_t fraction_budget = 4096 * CBM_TEST_MB;
+    size_t fraction_budget = 2048 * CBM_TEST_MB;
     const char *bad[] = {
         "abc", "0", "-512", "512MB", "512x", "0x400", "99999999999999999999999999",
     };
@@ -556,7 +578,7 @@ TEST(resolve_budget_invalid_override_falls_back) {
         cbm_mem_budget_t r = cbm_mem_resolve_budget(total, 0.5, bad[i]);
         ASSERT_EQ(r.budget, fraction_budget);
         ASSERT_TRUE(r.invalid);
-        ASSERT_STR_EQ(r.source, "ram_fraction");
+        ASSERT_STR_EQ(r.source, "default_cap");
     }
     PASS();
 }
@@ -1370,6 +1392,7 @@ SUITE(mem) {
     RUN_TEST(mem_init_second_call_noop);
     /* CBM_MEM_BUDGET_MB budget override */
     RUN_TEST(resolve_budget_no_override_uses_fraction);
+RUN_TEST(resolve_budget_default_cap_exemption);
     RUN_TEST(resolve_budget_invalid_fraction_defaults);
     RUN_TEST(resolve_budget_override_wins);
     RUN_TEST(resolve_budget_override_clamped_to_total);
