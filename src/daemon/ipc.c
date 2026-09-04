@@ -4108,19 +4108,19 @@ static DWORD win_private_mutation_rights(void) {
            DELETE | WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY;
 }
 
-/* Fork patch (fork issue #2): CBM_SKIP_DACL_HARDENING=1 opts out of the
- * cache-directory ACL walk on Windows. On hosts where an ancestor ACL outside
- * the user's control (a managed profile or harness directory leaking an
- * inherited Users / Authenticated Users ACE) fails the cache-private check,
- * the CLI/MCP refuses to start at all and only an invasive `icacls` reset on
- * a shared parent directory fixes it. The env switch is fail-open BY
- * REQUEST: ownership validation (win_file_owner_secure) still applies, and
- * the operator explicitly owns the relaxed local trust boundary. Deliberately
- * env-only — the config store lives inside the cache directory, so a config
- * key cannot affect the first run that creates it. */
-static bool win_dacl_hardening_skipped(void) {
-    const char *skip = getenv("CBM_SKIP_DACL_HARDENING");
-    return skip != NULL && strcmp(skip, "1") == 0;
+/* Fork patch (fork issue #2, amended): the cache-directory untrusted-ACE walk
+ * is OFF by default. On hosts where an ancestor ACL outside the user's
+ * control (a managed profile, or a shared tools directory like D:\tool-cli
+ * inheriting an Authenticated Users ACE) fails the cache-private check, the
+ * CLI/MCP used to refuse to start at all — an unacceptable default for a
+ * single-user local tool whose cache lives outside the user profile by
+ * design. Set CBM_DACL_HARDENING=1 to opt back in on multi-user or
+ * terminal-server hosts, where the ACE walk is the protection against other
+ * local accounts. Owner validation (win_file_owner_secure) applies in BOTH
+ * modes: the cache must be owned by the current user either way. */
+static bool win_dacl_hardening_enabled(void) {
+    const char *on = getenv("CBM_DACL_HARDENING");
+    return on != NULL && strcmp(on, "1") == 0;
 }
 
 static bool win_file_acl_secure(win_security_t *security, HANDLE file, DWORD mutation,
@@ -4134,10 +4134,11 @@ static bool win_file_acl_secure(win_security_t *security, HANDLE file, DWORD mut
     bool secure =
         status == ERROR_SUCCESS && descriptor && dacl && security->is_valid_acl(dacl) &&
         security->get_acl_information(dacl, &information, sizeof(information), AclSizeInformation);
-    if (secure && win_dacl_hardening_skipped()) {
-        /* Accept the OS-default DACL without the untrusted-grant walk: the
-         * owner-only one-ACE shape is no longer demanded. The owner is still
-         * validated by win_file_owner_secure at the caller. */
+    if (secure && !win_dacl_hardening_enabled()) {
+        /* Default (fork): accept the OS-default DACL without the
+         * untrusted-grant walk — the owner-only one-ACE shape is not demanded.
+         * The owner is still validated by win_file_owner_secure at the
+         * caller. */
         if (descriptor) {
             (void)LocalFree(descriptor);
         }
