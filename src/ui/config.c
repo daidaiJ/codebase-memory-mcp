@@ -122,10 +122,10 @@ void cbm_ui_config_load(cbm_ui_config_t *cfg) {
     bool opened = false;
     char *buffer = config_read_file(path, &length, &opened);
     if (!opened) {
-        /* No config file — auto-enable UI if binary has embedded assets */
-        if (CBM_EMBEDDED_FILE_COUNT > 0) {
-            cfg->ui_enabled = true;
-        }
+        /* Fork patch (fork issue #3): no config file means the UI stays off.
+         * Zero-usage auto-activation of a loopback HTTP listener is exactly
+         * the phone-home-shaped default the project removed in
+         * daemon/application.c — an opt-in service must be opted into. */
         return;
     }
     if (!buffer) {

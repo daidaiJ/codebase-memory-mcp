@@ -31,18 +31,21 @@ void cbm_mem_init_with_cap(double ram_fraction, size_t hard_cap_bytes);
  * the caller never re-parses the env string. */
 typedef struct {
     size_t budget;      /* resolved budget in bytes */
-    const char *source; /* "ram_fraction" | "CBM_MEM_BUDGET_MB" | "daemon_worker_cap" */
+    const char *source; /* "ram_fraction" | "default_cap" | "CBM_MEM_BUDGET_MB" |
+                           "daemon_worker_cap" */
     bool clamped;       /* override was valid but exceeded total_ram → clamped down */
     bool invalid;       /* override was present but unparseable / out-of-range / ≤0 */
     bool hard_capped;   /* internal worker hard cap reduced the resolved budget */
+    bool default_capped; /* fork patch: fraction-derived default hit the 2048MB cap */
 } cbm_mem_budget_t;
 
 /* Pure budget resolver shared by cbm_mem_init (exposed for testing).
- * Returns ram_fraction * total_ram, unless `budget_mb` is a STRICTLY valid
+ * Returns ram_fraction * total_ram — capped at 2048 MiB for the DEFAULT
+ * (fork patch, fork issue #3) — unless `budget_mb` is a STRICTLY valid
  * positive integer string (the CBM_MEM_BUDGET_MB override) — then it returns
  * that many MiB, clamped to total_ram when total_ram > 0. Trailing garbage,
  * overflow (ERANGE), and non-positive values are rejected (invalid=true) and
- * fall back to the fraction-derived value. Reads no globals/env. */
+ * fall back to the capped fraction-derived value. Reads no globals/env. */
 cbm_mem_budget_t cbm_mem_resolve_budget(size_t total_ram, double ram_fraction,
                                         const char *budget_mb);
 
