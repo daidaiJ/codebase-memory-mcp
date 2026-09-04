@@ -21,7 +21,7 @@
 | 内存预算 | RAM × 25%/35%/50%，无上限 | **封顶 2048 MiB** | 32GB 机器上游默认拿 11.4GB；`CBM_MEM_BUDGET_MB` 仍可显式上调 |
 | 图谱 UI | 首次运行自动启用 HTTP 服务 | **关闭**，需显式开启 | 零使用意图不应自我激活环回端口 |
 | 工具禁用 | 无 | **`tools_disabled`** 配置键 | MCP/CLI 双侧生效、fail-loud、`--help` 同步隐藏 |
-| Windows DACL | 祖先链有宽松 ACL 即拒启 | **`CBM_SKIP_DACL_HARDENING=1`** 可跳过 | 管控机上无法改共享父目录 ACL 时的逃生门 |
+| Windows DACL | 祖先链有宽松 ACL 即拒启 | **默认跳过**该遍历，属主校验保留；`CBM_DACL_HARDENING=1` 开回 | 单用户本地工具不该被共享工具目录的 ACL 挡在门外 |
 
 技术细节与逐文件修改点见 [docs/FORK_PATCHES.md](docs/FORK_PATCHES.md)。
 
@@ -109,7 +109,7 @@ codebase-memory-mcp config reset tools_disabled       # 恢复默认
 |------|------|------|
 | `CBM_LOG_LEVEL` | `error` | `debug`/`info`/`warn`/`error`/`none` 或 `0`-`4` |
 | `CBM_MEM_BUDGET_MB` | RAM 分数，**封顶 2048** | 显式设置可超过封顶（上限为物理内存） |
-| `CBM_SKIP_DACL_HARDENING` | *(未设)* | Windows 专用，`=1` 跳过缓存目录 DACL 硬化检查（属主校验仍生效） |
+| `CBM_DACL_HARDENING` | *(未设，即跳过)* | Windows 专用，fork：默认跳过缓存目录的不可信 ACE 遍历（`D:\tool-cli` 这类祖先目录带宽松 ACL 也照常启动，属主校验仍生效）。多用户/终端服务器主机设 `=1` 开回严格检查 |
 | `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | 索引与配置存储目录 |
 
 ## 什么时候用 cbm，什么时候用 grep/符号工具

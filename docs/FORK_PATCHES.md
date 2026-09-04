@@ -88,17 +88,28 @@ Resident resources and self-activation are opt-in:
   turns the loopback HTTP listener on for binaries with embedded assets;
   `config set ui_enabled true` / `--ui=true` is the explicit path.
 
-## 4. `CBM_SKIP_DACL_HARDENING` (fork issue #2)
+## 4. Windows DACL check: skipped by default (fork issue #2, amended)
 
-Windows-only env switch (`=1`, checked in `src/daemon/ipc.c`
-`win_file_acl_secure`) that skips the untrusted-ACE walk behind the
-"cache-private / DACL entry grants mutation rights to untrusted identity"
-startup refusal. For hosts where an ancestor ACL outside the user's control
-(managed profile, harness directory) cannot be fixed without an invasive
-`icacls` reset on a shared parent. Owner validation stays active; deliberately
-env-only because the config store lives inside the cache directory and cannot
-affect the run that creates it. Inspired by upstream PR #1649 (config key +
-restore logic); this fork ships the minimal env-only form.
+The cache-directory untrusted-ACE walk behind the "cache-private / DACL entry
+grants mutation rights to untrusted identity" startup refusal is **OFF by
+default** in the fork (`src/daemon/ipc.c`, `win_dacl_hardening_enabled`).
+`CBM_DACL_HARDENING=1` opts back in.
+
+Rationale (amended from the original env-switch design): the refusal fires on
+ancestor ACLs outside the user's control — a managed profile, or a shared
+tools directory (`D:\tool-cli`) inheriting an Authenticated Users ACE — and a
+hard startup failure is the wrong default for a single-user local tool whose
+cache lives outside the user profile by design. Owner validation
+(`win_file_owner_secure`) applies in BOTH modes, so the cache must still be
+owned by the current user; only the "no other ACE grants mutation" walk is
+dropped. Multi-user / terminal-server hosts should set `CBM_DACL_HARDENING=1`.
+Env-only by design: the config store lives inside the cache directory and
+cannot affect the run that creates it. Inspired by upstream PR #1649 (config
+key + restore logic); this fork ships the inverted-default env form.
+
+Earlier name `CBM_SKIP_DACL_HARDENING` (opt-out while default stayed strict)
+existed only in the first patch build and was replaced by the inverted
+`CBM_DACL_HARDENING` before any tagged release.
 
 ## Verification notes
 
