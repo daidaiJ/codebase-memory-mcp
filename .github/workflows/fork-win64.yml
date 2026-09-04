@@ -1,0 +1,77 @@
+# Fork lean build: one windows-amd64 CLI binary, nothing else.
+#
+# Upstream `_build.yml` builds a 3-platform matrix with UI assets, provenance
+# attestation, stripped/unstripped candidates and third-party notice bundles.
+# The fork ships a CLI-only exe — `scripts/build.sh` without `--with-ui`
+# (no node step), one artifact, one release asset on tags.
+#
+# Local consumption: download from the run artifacts (or the release) and
+# replace ~/tools/codebase-memory-mcp/.
+
+name: fork-win64
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # release upload on tag pushes
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up msys2 (CLANG64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          path-type: inherit
+          update: false
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-zlib
+            make
+            python
+
+      - name: Build CLI binary
+        shell: msys2 {0}
+        env:
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          if [ -n "$VERSION" ]; then
+            scripts/build.sh --version "$VERSION" CC=clang CXX=clang++
+          else
+            scripts/build.sh CC=clang CXX=clang++
+          fi
+
+      - name: Smoke test
+        shell: msys2 {0}
+        run: ./build/c/codebase-memory-mcp.exe --version
+
+      - name: Stage artifact
+        shell: msys2 {0}
+        run: |
+          mkdir -p dist
+          cp build/c/codebase-memory-mcp.exe dist/codebase-memory-mcp-windows-amd64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codebase-memory-mcp-windows-amd64
+          path: dist/codebase-memory-mcp-windows-amd64.exe
+          if-no-files-found: error
+
+      - name: Release (tag pushes only)
+        if: github.ref_type == 'tag'
+        shell: msys2 {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/codebase-memory-mcp-windows-amd64.exe \
+            --title "$GITHUB_REF_NAME" --generate-notes ||
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/codebase-memory-mcp-windows-amd64.exe --clobber
