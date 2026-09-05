@@ -51,7 +51,7 @@ docs/
 
 ## CI 约定（2026-09-05 精简）
 
-workflow 只保留 4 个：`fork-win64.yml`（构建 + tag 发 release）、`stale.yml`、`issue-labeler.yml`、`label-actions.yml`（后三个管 issue）。上游遗产 CI（DCO 签名检查、Scorecard、CodeQL、上游 build/lint/test/security/PR 系列、上游 release.yml、pages、cache-warm、soak/repro 类）已全部删除——本仓库无外部贡献者，DCO 不再要求 `git commit -s`；发版只走 `fork-win64`（打 `v*fork*` tag），不要重新引入上游 release.yml。
+workflow 只保留 `fork-win64.yml`（构建 + tag 发 release）。上游遗产 CI（DCO 签名检查、Scorecard、CodeQL、上游 build/lint/test/security/PR 系列、上游 release.yml、pages、cache-warm、soak/repro 类、issue 管理 stale/label 系列）已全部删除——本仓库无外部贡献者，DCO 不再要求 `git commit -s`；发版只走 `fork-win64`（打 `v*fork*` tag），不要重新引入上游 release.yml。
 
 ## 开发约定
 
