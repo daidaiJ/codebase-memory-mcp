@@ -49,6 +49,10 @@ docs/
 5. **wire protocol**：tool profile 以 uint8 走 context 头，`application.c` 里 client 发送侧和 daemon 校验侧的边界必须同时放宽，否则会话直接被拒。
 6. **daemon 会话的 config 句柄**：MCP 面的 denylist 读 `srv->config`（daemon 启动时打开的 `_config.db`，每请求现查 sqlite，无缓存）；本地策略读 `<session_root>/.cbm/config.json`；CLI 面读 cwd 的本地文件 → 全局库。
 
+## CI 约定（2026-09-05 精简）
+
+workflow 只保留 4 个：`fork-win64.yml`（构建 + tag 发 release）、`stale.yml`、`issue-labeler.yml`、`label-actions.yml`（后三个管 issue）。上游遗产 CI（DCO 签名检查、Scorecard、CodeQL、上游 build/lint/test/security/PR 系列、上游 release.yml、pages、cache-warm、soak/repro 类）已全部删除——本仓库无外部贡献者，DCO 不再要求 `git commit -s`；发版只走 `fork-win64`（打 `v*fork*` tag），不要重新引入上游 release.yml。
+
 ## 开发约定
 
 ### 修改配置项
