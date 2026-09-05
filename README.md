@@ -130,3 +130,4 @@ codebase-memory-mcp config reset tools_disabled       # 恢复默认
 | [docs/FORK_PATCHES.md](docs/FORK_PATCHES.md) | fork 补丁清单：动机、修改点、验证矩阵 |
 | [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md) | 上游原版 README（架构、安装、全部工具说明） |
 | [AGENTS.md](AGENTS.md) | 智能体协作指南（目录结构、开发约定、坑位清单） |
+| [skills/cbm/SKILL.md](skills/cbm/SKILL.md) | Agent Skill：何时用/不用 cbm、安装方法、三个实测有效的命令配方与硬规则 |
