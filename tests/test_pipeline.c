@@ -13409,6 +13409,54 @@ TEST(pipeline_markdown_and_config_prose_reaches_fts_body) {
     PASS();
 }
 
+/* A graph with no Function or Method nodes at all -- a struct-only or
+ * config-only project -- must run pass_semantic_edges cleanly. Its phase-1
+ * scan used to hand qsort() a NULL base with count 0, before the func_count
+ * early-out in phase 1b could run. glibc declares qsort's base nonnull, so
+ * UBSan on the Linux leg reports that call; the macOS SDK carries no such
+ * attribute, so the sanitizer is silent there. The label counts pin the
+ * fixture to what it claims: at least one Struct and zero Function/Method,
+ * i.e. the scan genuinely finds nothing to sort. */
+TEST(pipeline_semantic_edges_no_functions) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_nofunc_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    char path[512];
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/nofunc.db", tmp);
+
+    snprintf(path, sizeof(path), "%s/main.go", tmp);
+    ASSERT_EQ(th_write_file(path, "package main\n\ntype Widget struct{}\n"), 0);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, dbpath, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    cbm_pipeline_free(p);
+
+    cbm_store_t *s = cbm_store_open_path(dbpath);
+    ASSERT_NOT_NULL(s);
+    sqlite3_stmt *st = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(s), "SELECT COUNT(*) FROM nodes WHERE label = ?1",
+                                 -1, &st, NULL),
+              SQLITE_OK);
+    const char *labels[] = {"Struct", "Function", "Method"};
+    int counts[3] = {0, 0, 0};
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+        sqlite3_reset(st);
+        sqlite3_bind_text(st, 1, labels[i], -1, SQLITE_TRANSIENT);
+        ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+        counts[i] = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    cbm_store_close(s);
+    ASSERT_GT(counts[0], 0);
+    ASSERT_EQ(counts[1], 0);
+    ASSERT_EQ(counts[2], 0);
+
+    th_rmtree(tmp);
+    PASS();
+}
+
 #if defined(CBM_COVERAGE_MARKER_TEST_API) && CBM_COVERAGE_MARKER_TEST_API
 /* Join two Studio Export range strings and hand back the result. The caller
  * owns nothing: the string lives in the aggregate's arena, so copy it out
@@ -13827,6 +13875,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_ensemble_routing_unterminated_item_is_safe);
     RUN_TEST(pipeline_delta_patch_indexes_docstring_into_fts_body);
     RUN_TEST(pipeline_markdown_and_config_prose_reaches_fts_body);
+    RUN_TEST(pipeline_semantic_edges_no_functions);
 }
 
 /* Focused semantic-manifest and publication contracts. Kept separate from the
