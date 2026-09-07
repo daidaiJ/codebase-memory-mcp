@@ -1419,7 +1419,7 @@ TEST(cli_install_recovers_markerless_stale_rendezvous) {
     snprintf(dir_arg, sizeof(dir_arg), "--dir=%s", install_dir);
     char *install_argv[] = {"--force", "--skip-config", "--yes", dir_arg};
     int install_rc = orphan_created ? cli_test_cmd_install(4, install_argv) : -1;
-    cbm_cli_set_activation_runtime_parent_for_test(NULL);
+    cbm_cli_set_activation_runtime_parent_for_test(g_cli_suite_runtime_parent);
     cbm_set_auto_answer_for_test(0);
 
     struct stat target_status = {0};
