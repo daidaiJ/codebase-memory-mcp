@@ -60,7 +60,7 @@ jobs:
         shell: msys2 {0}
         run: |
           set -e
-          CBM=./build/c/codebase-memory-mcp.exe
+          CBM="$GITHUB_WORKSPACE/build/c/codebase-memory-mcp.exe"
           SMOKE="$RUNNER_TEMP/smoke-repo"
           mkdir -p "$SMOKE" && cd "$SMOKE"
           git init -q
