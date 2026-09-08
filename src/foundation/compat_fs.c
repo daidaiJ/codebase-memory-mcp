@@ -868,11 +868,10 @@ FILE *cbm_fopen(const char *path, const char *mode) {
  * Inspecting the link and following it are two steps, so what the follow
  * lands on is checked as well: the opened target must be a directory owned by
  * root or the invoking user, and not world-writable unless sticky. An account
- * that can swap the link between the two steps (it needs write access to the
- * parent, which the walk holds open) therefore cannot steer the walk into a
- * directory it controls or into one where anyone can pre-plant entries. This
- * is the before/after idiom the activation transaction uses around its own
- * opens. */
+ * that can write the parent cannot steer the walk into a directory it
+ * controls or into one where anyone can pre-plant entries, and because the
+ * judgement and the follow are bound to one inode (cbm_read_trusted_link) it
+ * cannot substitute a link of its own between them either. */
 static bool cbm_walk_link_trusted(uid_t owner, bool follow_owned) {
     return owner == 0U || (follow_owned && owner == geteuid());
 }
@@ -884,18 +883,69 @@ static bool cbm_walk_target_trusted(const struct stat *target) {
     return S_ISDIR(target->st_mode) && trusted_owner && (!world_writable || sticky);
 }
 
+/* Read the target text of the symlink at `component`, but only if the link's
+ * owner is trusted -- and read it from the SAME inode the judgement was made
+ * on. Judging by name and then opening by name is a check-then-use pair: an
+ * account that can write the parent could swap the entry in between, so the
+ * link that gets followed is never the one that was judged (demonstrated
+ * against an earlier head with an LD_PRELOAD shim). The link is therefore
+ * never opened by name after the judgement: on Linux an O_PATH|O_NOFOLLOW
+ * descriptor pins the inode, and both the fstat and the readlinkat operate on
+ * it; elsewhere the link is stat'ed by name before and after the readlinkat
+ * and both must be the same inode with the same owner. What is followed
+ * afterwards is the text this function returns, resolved from the parent. */
+static bool cbm_read_trusted_link(int parent, const char *component, bool follow_owned, char *text,
+                                  size_t text_size) {
+    ssize_t length = 0; /* nothing read yet: refused below unless a read succeeds */
+#if defined(__linux__) && defined(O_PATH)
+    int link = openat(parent, component, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (link < 0) {
+        return false;
+    }
+    struct stat state;
+    if (fstat(link, &state) == 0 && S_ISLNK(state.st_mode) &&
+        cbm_walk_link_trusted(state.st_uid, follow_owned)) {
+        /* An empty path names the link the descriptor itself refers to. */
+        length = readlinkat(link, "", text, text_size);
+    }
+    (void)close(link);
+#else
+    struct stat before;
+    struct stat after;
+    if (fstatat(parent, component, &before, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISLNK(before.st_mode) ||
+        !cbm_walk_link_trusted(before.st_uid, follow_owned)) {
+        return false;
+    }
+    length = readlinkat(parent, component, text, text_size);
+    if (fstatat(parent, component, &after, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISLNK(after.st_mode) ||
+        after.st_dev != before.st_dev || after.st_ino != before.st_ino ||
+        after.st_uid != before.st_uid) {
+        return false;
+    }
+#endif
+    /* Empty or truncated text is refused rather than guessed at. */
+    if (length <= 0 || (size_t)length >= text_size) {
+        return false;
+    }
+    text[length] = '\0';
+    return true;
+}
+
 static int cbm_open_directory_component(int parent, const char *component, int flags,
                                         bool follow_owned) {
     int descriptor = openat(parent, component, flags);
 #if defined(O_NOFOLLOW) && defined(AT_SYMLINK_NOFOLLOW)
     if (descriptor < 0) {
         /* The caller decides on errno from the FIRST open (ENOENT means
-         * "create it"); a refused link must not leak fstatat's errno instead. */
+         * "create it"); a refused link must not leak a later call's errno. */
         int open_errno = errno;
-        struct stat state;
-        if (fstatat(parent, component, &state, AT_SYMLINK_NOFOLLOW) == 0 &&
-            S_ISLNK(state.st_mode) && cbm_walk_link_trusted(state.st_uid, follow_owned)) {
-            int followed = openat(parent, component, flags & ~O_NOFOLLOW);
+        char text[CBM_SZ_4K];
+        if (cbm_read_trusted_link(parent, component, follow_owned, text, sizeof(text))) {
+            /* The judged link's own text, resolved from the parent exactly as
+             * the kernel would resolve it (relative texts against the link's
+             * directory). Links inside the text are resolved by the kernel as
+             * before; the target check bounds where the walk lands. */
+            int followed = openat(parent, text, flags & ~O_NOFOLLOW);
             struct stat target;
             if (followed >= 0 && fstat(followed, &target) == 0 &&
                 cbm_walk_target_trusted(&target)) {

@@ -178,6 +178,83 @@ TEST(platform_mkdir_p_follows_own_symlink_only_when_opted_in) {
 #endif
 }
 
+/* A followed link is resolved from its own text, so the text has to be
+ * resolved the way the kernel resolves it: a relative text against the link's
+ * directory (never the process's working directory), an absolute text as is,
+ * and links inside the text followed in turn. The test changes into an
+ * unrelated directory first so a CWD-relative resolution would miss. */
+TEST(platform_mkdir_p_resolves_link_text_from_the_link_directory) {
+#ifdef _WIN32
+    SKIP_PLATFORM("POSIX symlink ownership contract");
+#else
+    char base[CBM_SZ_512];
+    int written = snprintf(base, sizeof(base), "/tmp/cbm-linktext-XXXXXX");
+    ASSERT_TRUE(written > 0 && written < (int)sizeof(base));
+    ASSERT_NOT_NULL(cbm_mkdtemp(base));
+    char elsewhere[CBM_SZ_1K];
+    char target[CBM_SZ_1K];
+    char nested[CBM_SZ_1K];
+    (void)snprintf(elsewhere, sizeof(elsewhere), "%s/elsewhere", base);
+    (void)snprintf(target, sizeof(target), "%s/dir/target", base);
+    (void)snprintf(nested, sizeof(nested), "%s/dir/nested", base);
+    ASSERT_TRUE(cbm_mkdir_p(elsewhere, 0700));
+    ASSERT_TRUE(cbm_mkdir_p(target, 0700));
+    ASSERT_TRUE(cbm_mkdir_p(nested, 0700));
+
+    char saved_cwd[CBM_SZ_1K];
+    ASSERT_NOT_NULL(getcwd(saved_cwd, sizeof(saved_cwd)));
+    ASSERT_EQ(chdir(elsewhere), 0);
+
+    /* relative text, sibling: dir/relative -> target */
+    char link[CBM_SZ_1K];
+    char through[CBM_SZ_1K];
+    char created[CBM_SZ_1K];
+    (void)snprintf(link, sizeof(link), "%s/dir/relative", base);
+    ASSERT_EQ(symlink("target", link), 0);
+    (void)snprintf(through, sizeof(through), "%s/child-relative", link);
+    (void)snprintf(created, sizeof(created), "%s/child-relative", target);
+    ASSERT_TRUE(cbm_mkdir_p_ex(through, 0700, CBM_MKDIR_FOLLOW_OWNED));
+    ASSERT_TRUE(cbm_is_dir(created));
+    ASSERT_EQ(cbm_rmdir(created), 0);
+    ASSERT_EQ(cbm_unlink(link), 0);
+
+    /* relative text through the parent: dir/nested/up -> ../target */
+    (void)snprintf(link, sizeof(link), "%s/up", nested);
+    ASSERT_EQ(symlink("../target", link), 0);
+    (void)snprintf(through, sizeof(through), "%s/child-up", link);
+    (void)snprintf(created, sizeof(created), "%s/child-up", target);
+    ASSERT_TRUE(cbm_mkdir_p_ex(through, 0700, CBM_MKDIR_FOLLOW_OWNED));
+    ASSERT_TRUE(cbm_is_dir(created));
+    ASSERT_EQ(cbm_rmdir(created), 0);
+    ASSERT_EQ(cbm_unlink(link), 0);
+
+    /* absolute text, and a chain whose text names another link */
+    (void)snprintf(link, sizeof(link), "%s/absolute", base);
+    ASSERT_EQ(symlink(target, link), 0);
+    char chain[CBM_SZ_1K];
+    (void)snprintf(chain, sizeof(chain), "%s/chain", base);
+    ASSERT_EQ(symlink("absolute", chain), 0);
+    (void)snprintf(through, sizeof(through), "%s/child-chain", chain);
+    (void)snprintf(created, sizeof(created), "%s/child-chain", target);
+    ASSERT_TRUE(cbm_mkdir_p_ex(through, 0700, CBM_MKDIR_FOLLOW_OWNED));
+    ASSERT_TRUE(cbm_is_dir(created));
+    ASSERT_EQ(cbm_rmdir(created), 0);
+    ASSERT_EQ(cbm_unlink(chain), 0);
+    ASSERT_EQ(cbm_unlink(link), 0);
+
+    ASSERT_EQ(chdir(saved_cwd), 0);
+    ASSERT_EQ(cbm_rmdir(target), 0);
+    ASSERT_EQ(cbm_rmdir(nested), 0);
+    char *slash = strrchr(target, '/');
+    ASSERT_NOT_NULL(slash);
+    *slash = '\0';
+    ASSERT_EQ(cbm_rmdir(target), 0); /* dir */
+    ASSERT_EQ(cbm_rmdir(elsewhere), 0);
+    ASSERT_EQ(cbm_rmdir(base), 0);
+    PASS();
+#endif
+}
+
 /* The trust an opted-in walk extends to a symlink is bounded on BOTH ends of
  * the link. What the follow lands on must be a directory owned by root or the
  * invoking user and not world-writable unless sticky; the mode legs bind on
@@ -1056,6 +1133,7 @@ SUITE(platform) {
     RUN_TEST(platform_mkdir_p_follows_own_symlink_only_when_opted_in);
     RUN_TEST(platform_mkdir_p_symlink_trust_is_bounded_by_owner_and_mode);
     RUN_TEST(platform_mkdir_p_follow_owned_is_per_call_site);
+    RUN_TEST(platform_mkdir_p_resolves_link_text_from_the_link_directory);
     RUN_TEST(platform_mkstemp_and_mkdtemp_survive_non_ascii_directory);
     RUN_TEST(platform_mkdtemp_is_thread_safe);
     RUN_TEST(platform_counter_scaling_avoids_intermediate_overflow);
