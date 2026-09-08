@@ -10469,9 +10469,10 @@ TEST(cli_mcp_installers_preserve_foreign_same_name_entries) {
  * /home indirection, macOS /tmp): only root can create them, so they are
  * outside the attacker model. A link owned by ANY OTHER account is the
  * planted-link case the O_NOFOLLOW parent-chain walk exists for, and stays
- * refused. Only root can create a foreign-owned link, so the refusal leg is
- * exercised when the suite runs as root (containers); the follow leg runs
- * everywhere. */
+ * refused, and so is a user-owned link when the installer itself runs as
+ * root. Only root can create a link owned by someone else, so both refusal
+ * legs are exercised when the suite runs as root (containers); the follow leg
+ * runs everywhere. */
 TEST(cli_installer_follows_symlinked_agent_roots_only_for_trusted_owners) {
 #ifdef _WIN32
     SKIP_PLATFORM("POSIX symlink parent-chain contract");
@@ -10479,10 +10480,13 @@ TEST(cli_installer_follows_symlinked_agent_roots_only_for_trusted_owners) {
     char tmpdir[256];
     char own_target[256];
     char foreign_target[256];
+    char user_target[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-linked-roots-XXXXXX");
     snprintf(own_target, sizeof(own_target), "/tmp/cli-linked-own-XXXXXX");
     snprintf(foreign_target, sizeof(foreign_target), "/tmp/cli-linked-foreign-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir) || !cbm_mkdtemp(own_target) || !cbm_mkdtemp(foreign_target))
+    snprintf(user_target, sizeof(user_target), "/tmp/cli-linked-user-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir) || !cbm_mkdtemp(own_target) || !cbm_mkdtemp(foreign_target) ||
+        !cbm_mkdtemp(user_target))
         FAIL("cbm_mkdtemp failed");
     char qoder_link[512];
     snprintf(qoder_link, sizeof(qoder_link), "%s/.qoder", tmpdir);
@@ -10530,18 +10534,49 @@ TEST(cli_installer_follows_symlinked_agent_roots_only_for_trusted_owners) {
         }
     }
 
+    /* Refusal leg (root only): a privileged install into another account's
+     * home. Home, link and target are all owned by that account and the walk
+     * runs as euid 0, which trusts only root-owned links, so the user's link
+     * is refused and nothing lands in the target. This pins the claim that
+     * following user-owned links never extends to a root-run install. */
+    bool user_refused = true;
+    bool user_setup_ok = true;
+    if (geteuid() == 0) {
+        enum { LINKED_HOME_UID = 65533 };
+        user_setup_ok = cbm_unlink(qoder_link) == 0 && symlink(user_target, qoder_link) == 0 &&
+                        lchown(qoder_link, LINKED_HOME_UID, LINKED_HOME_UID) == 0 &&
+                        chown(user_target, LINKED_HOME_UID, LINKED_HOME_UID) == 0 &&
+                        chown(tmpdir, LINKED_HOME_UID, LINKED_HOME_UID) == 0;
+        if (user_setup_ok) {
+            int user_rc =
+                cbm_install_agent_configs(tmpdir, "/opt/codebase-memory-mcp", false, false);
+            char user_settings[512];
+            char user_skill[512];
+            snprintf(user_settings, sizeof(user_settings), "%s/settings.json", user_target);
+            snprintf(user_skill, sizeof(user_skill), "%s/skills/codebase-memory/SKILL.md",
+                     user_target);
+            user_refused =
+                user_rc != 0 && stat(user_settings, &state) != 0 && stat(user_skill, &state) != 0;
+        }
+    }
+
     restore_test_env("HOME", saved_home);
     restore_test_env("PATH", saved_path);
     cbm_unlink(qoder_link);
     test_rmdir_r(tmpdir);
     test_rmdir_r(own_target);
     test_rmdir_r(foreign_target);
+    test_rmdir_r(user_target);
     if (!foreign_setup_ok)
         FAIL("could not plant a foreign-owned link while running as root");
+    if (!user_setup_ok)
+        FAIL("could not plant a user-owned link and home while running as root");
     if (own_rc != 0 || !followed)
         FAIL("installer must follow an agent root symlinked by the invoking account");
     if (!foreign_refused)
         FAIL("installer must not follow an agent root symlinked by another account");
+    if (!user_refused)
+        FAIL("a root-run installer must not follow an agent root symlinked by the home's owner");
     PASS();
 #endif
 }
