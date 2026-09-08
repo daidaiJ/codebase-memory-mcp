@@ -835,6 +835,12 @@ static int run_cli(int argc, char **argv, cbm_project_lock_manager_t *project_lo
              * from its own process-level coordination setup and therefore
              * owns the mutation lease while it performs the physical write. */
             cbm_mcp_server_set_background_tasks(srv, false);
+            /* Fork patch (fork issue #4): cbm_mcp_server_new defaults to the
+             * MINIMAL agent surface, but the worker re-dispatches the parent's
+             * tool (index_repository is not on the minimal allowlist) — the
+             * worker runs the internal registry, like the daemon-side session,
+             * not the constrained agent surface. */
+            cbm_mcp_server_set_tool_profile(srv, CBM_MCP_TOOL_PROFILE_ALL);
             if (project_locks) {
                 cbm_mcp_server_set_project_mutation_guard(srv, main_local_cli_mutation_begin,
                                                           main_local_cli_mutation_end, &mutation);
