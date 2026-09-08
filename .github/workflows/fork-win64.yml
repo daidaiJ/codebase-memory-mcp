@@ -52,6 +52,25 @@ jobs:
         shell: msys2 {0}
         run: ./build/c/codebase-memory-mcp.exe --version
 
+      # Regression (v0.8.1-fork.1): the in-process index worker kept the
+      # minimal tool profile, so `cli index_repository` failed with "tool
+      # 'index_repository' is not available in the minimal tool profile".
+      # --version alone cannot catch this; exercise the index round-trip.
+      - name: Smoke test (index round-trip)
+        shell: msys2 {0}
+        run: |
+          set -e
+          CBM=./build/c/codebase-memory-mcp.exe
+          SMOKE="$RUNNER_TEMP/smoke-repo"
+          mkdir -p "$SMOKE" && cd "$SMOKE"
+          git init -q
+          printf 'int main(void) { return 0; }\n' > main.c
+          git add main.c
+          git -c user.email=smoke@example.com -c user.name=smoke commit -qm init
+          cd "$RUNNER_TEMP"
+          "$CBM" cli index_repository --repo-path "$SMOKE" --mode fast
+          "$CBM" cli list_projects
+
       - name: Stage artifact
         shell: msys2 {0}
         run: |
