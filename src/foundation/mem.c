@@ -514,6 +514,22 @@ bool cbm_mem_over_budget(void) {
     return rss > g_budget;
 }
 
+/* Reclaimable memory below this share of total RAM is where paging starts to
+ * hurt, so it is the point at which pressing on stops being reasonable. */
+enum { MEM_PRESSURE_AVAIL_DIVISOR = 8 }; /* 12.5% of total RAM */
+
+bool cbm_mem_system_under_pressure(void) {
+    size_t available = cbm_system_available_ram();
+    if (available == 0) {
+        return false; /* platform cannot answer - do not abort on a guess */
+    }
+    cbm_system_info_t info = cbm_system_info();
+    if (info.total_ram == 0) {
+        return false;
+    }
+    return available < info.total_ram / MEM_PRESSURE_AVAIL_DIVISOR;
+}
+
 size_t cbm_mem_worker_budget(int num_workers) {
     if (num_workers <= 0) {
         num_workers = SKIP_ONE;

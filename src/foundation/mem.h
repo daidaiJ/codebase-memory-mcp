@@ -75,6 +75,21 @@ bool cbm_mem_over_budget(void);
 /* Per-worker budget hint: budget / num_workers. */
 size_t cbm_mem_worker_budget(int num_workers);
 
+/* True only when the SYSTEM is genuinely short of memory, not merely when this
+ * process is over its advisory budget.
+ *
+ * The budget is a static fraction of TOTAL ram, so on a large host it refuses
+ * work the machine can plainly do: measured 2026-09-13, the linux kernel needs
+ * 31.75 GB of a 48 GB host against a 24 GB budget, and the previous release
+ * completed the very same index by overshooting to 33.56 GB. Aborting on the
+ * budget alone therefore turned a working index into a refusal.
+ *
+ * So the budget keeps its job as the BACKPRESSURE trigger (workers park, peers
+ * return transients) and this answers the different question of whether giving
+ * up is warranted. Returns false when availability is unknown: never abort on
+ * a guess. */
+bool cbm_mem_system_under_pressure(void);
+
 /* Return unused pages to the OS. Call between files to bound per-file peak. */
 void cbm_mem_collect(void);
 

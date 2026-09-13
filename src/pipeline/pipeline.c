@@ -37,6 +37,7 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6 };
 #include "foundation/compat_thread.h"
 #include "foundation/profile.h"
 #include "foundation/mem.h"
+#include "foundation/mem_core.h"
 #include "foundation/secure_random.h"
 
 #include <ctype.h>
@@ -988,6 +989,23 @@ static void predump_importance(cbm_pipeline_ctx_t *ctx) {
     cbm_pipeline_pass_importance(ctx);
 }
 
+/* Phase boundary for memory attribution. Two instruments, both already in
+ * foundation/, both previously wired ONLY into MCP request handling and never
+ * into the index pipeline -- which is where the memory is (a kernel index
+ * peaks at 35 GB in extraction, measured 2026-09-13 with an external sampler
+ * because nothing in-process could say which phase it was in):
+ *   - cbm_mem_phase_mark attributes the committed-bytes delta since the last
+ *     mark to the phase just ended. Off unless CBM_MEM_PHASES=1.
+ *   - cbm_mem_class_log prints the mem_core class table, so the log answers
+ *     WHICH class grew in WHICH pass. Logs nothing until a class has activity,
+ *     so it is silent on a tree that has not migrated yet.
+ * Marks must bracket the whole path with no unlabelled gaps (mem.h), hence a
+ * mark at every pass.timing site plus pipeline.begin at the top. */
+static void pipeline_phase_mark(const char *pass) {
+    cbm_mem_phase_mark(pass);
+    cbm_mem_class_log(pass);
+}
+
 static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
     static const struct {
         predump_pass_fn fn;
@@ -1024,6 +1042,7 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
         passes[i].fn(ctx);
         cbm_log_info("pass.timing", "pass", passes[i].name, "elapsed_ms",
                      itoa_buf((int)elapsed_ms(t)));
+        pipeline_phase_mark(passes[i].name);
     }
 }
 
@@ -1145,6 +1164,7 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         }
         cbm_log_info("pass.timing", "pass", seq_passes[si].name, "elapsed_ms",
                      itoa_buf((int)elapsed_ms(*t)));
+        pipeline_phase_mark(seq_passes[si].name);
         if (check_cancel(p)) {
             rc = CBM_NOT_FOUND;
         }
@@ -1222,6 +1242,7 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     int rc = cbm_parallel_extract(ctx, files, file_count, cache, &shared_ids, worker_count);
     cbm_log_info("pass.timing", "pass", "parallel_extract", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(*t)));
+    pipeline_phase_mark("parallel_extract");
     if (rc != 0 || check_cancel(p)) {
         for (int i = 0; i < file_count; i++) {
             cbm_free_result(cache[i]);
@@ -2238,6 +2259,7 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_hash_t *bas
     }
     cbm_log_info("pass.timing", "pass", "dump_and_persist", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(*t)), "files", itoa_buf(manifest_count));
+    pipeline_phase_mark("dump_and_persist");
     if (p->ignored_total > p->ignored_count) {
         cbm_log_warn("index.ignored_capped", "stored", itoa_buf(p->ignored_count), "total",
                      itoa_buf(p->ignored_total));
@@ -2302,6 +2324,7 @@ static int run_tests_and_history(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     int rc = cbm_pipeline_pass_tests(ctx, files, file_count);
     CBM_PROF_END_N("pipeline", "pass_tests", t_tests, file_count);
     cbm_log_info("pass.timing", "pass", "tests", "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
+    pipeline_phase_mark("tests");
     if (rc == 0 && !check_cancel(p)) {
         CBM_PROF_START(t_gh);
         rc = run_githistory(p, ctx);
@@ -3040,6 +3063,12 @@ static void sweep_orphan_stages(const char *final_path) {
 }
 
 int cbm_pipeline_run(cbm_pipeline_t *p) {
+    /* Per-index attribution: peaks and phase totals are about THIS index, not
+     * the process history, so they start clean here. The first mark opens
+     * the labelled path; every pass.timing site below closes a phase. */
+    cbm_mem_class_reset_peaks();
+    cbm_mem_phase_reset();
+    cbm_mem_phase_mark("pipeline.begin");
     if (!p) {
         return CBM_NOT_FOUND;
     }
