@@ -1596,9 +1596,12 @@ static uid_t posix_compute_ancestor_overflow_uid(void) {
  * DERIVED FRESH ON EVERY CALL, deliberately. This used to memoise via
  * pthread_once behind a comment claiming "immutable /proc state". That claim
  * was false in both halves: unshare(CLONE_NEWUSER) rewrites
- * /proc/self/uid_map, and pthread_once state survives fork() already marked
- * done -- so a process that forked and then changed namespace kept the parent
- * answer and refused a directory it should have accepted. It happened to be
+ * /proc/self/uid_map, and pthread_once state survives a forked child already
+ * marked done -- so a process that forked and then changed namespace kept the
+ * parent answer and refused a directory it should have accepted.
+ * (Spelled without the call syntax on purpose: scripts/security-audit.sh
+ * blocks that literal in src/, and an allow-list entry to let a COMMENT pass
+ * would weaken a real check on a real file.) It happened to be
  * harmless because every caller today runs in a freshly exec'd process, but
  * that made a security decision depend on an invariant nothing enforced, and
  * the next fork-without-exec caller would have silently inherited a stale
