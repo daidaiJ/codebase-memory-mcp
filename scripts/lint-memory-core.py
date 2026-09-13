@@ -29,8 +29,12 @@ EXEMPT. The core itself and the allocator plumbing it sits on:
     src/foundation/mem.c             policy/measurement, probes with malloc
     src/foundation/mem_override_*.c  the --wrap / override shims
     src/foundation/compat*.c         libc replacement surface
-    internal/cbm/vendored/**         not ours
+    internal/**/vendored/**          not ours
     vendored/**                      not ours
+
+SCOPE. Everything under src/ and internal/ -- cli, mcp, daemon, store,
+pipeline, the extraction engine -- so the count is for the whole project, not
+one subsystem, and a leak shows up wherever it is.
 
 Usage:
     lint-memory-core.py                  check against the baseline (CI)
@@ -49,7 +53,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts" / "memory-core-baseline.txt"
-SCAN_ROOTS = ("src", "internal/cbm")
+SCAN_ROOTS = ("src", "internal")
 RAW = re.compile(r"(?<![A-Za-z0-9_])(malloc|calloc|realloc|free|strdup|strndup)\s*\(")
 
 EXEMPT_EXACT = {
@@ -61,13 +65,17 @@ EXEMPT_EXACT = {
 EXEMPT_PREFIX = (
     "src/foundation/mem_override_",
     "src/foundation/compat",
-    "internal/cbm/vendored/",
     "vendored/",
 )
 
 
+def is_vendored(rel: str) -> bool:
+    """Any vendored/ segment anywhere under internal/ is not ours."""
+    return "/vendored/" in rel or rel.startswith("vendored/")
+
+
 def is_exempt(rel: str) -> bool:
-    return rel in EXEMPT_EXACT or rel.startswith(EXEMPT_PREFIX)
+    return rel in EXEMPT_EXACT or rel.startswith(EXEMPT_PREFIX) or is_vendored(rel)
 
 
 def strip_comments_and_strings(text: str) -> str:
