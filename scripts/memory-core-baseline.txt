@@ -39,8 +39,6 @@ src/discover/discover.c	31
 src/discover/gitignore.c	12
 src/discover/userconfig.c	15
 src/foundation/diagnostics.c	7
-src/foundation/dyn_array.h	4
-src/foundation/hash_table.c	3
 src/foundation/lock_registry.c	18
 src/foundation/platform.c	11
 src/foundation/platform.h	5
@@ -51,7 +49,6 @@ src/foundation/win_utf8.h	17
 src/foundation/workspace.c	3
 src/foundation/yaml.c	10
 src/git/git_context.c	18
-src/graph_buffer/graph_buffer.c	83
 src/main.c	32
 src/mcp/compact_out.c	39
 src/mcp/index_supervisor.c	8
@@ -76,9 +73,7 @@ src/pipeline/pass_k8s.c	13
 src/pipeline/pass_lsp_cross.c	50
 src/pipeline/pass_parallel.c	31
 src/pipeline/pass_pkgmap.c	82
-src/pipeline/pass_semantic.c	13
-src/pipeline/pass_semantic_edges.c	48
-src/pipeline/pass_similarity.c	12
+src/pipeline/pass_semantic.c	3
 src/pipeline/pass_tests.c	3
 src/pipeline/pass_usages.c	4
 src/pipeline/path_alias.c	42
@@ -87,8 +82,6 @@ src/pipeline/pipeline_delta.c	19
 src/pipeline/pipeline_incremental.c	144
 src/pipeline/registry.c	19
 src/pipeline/worker_pool.c	2
-src/semantic/semantic.c	54
-src/simhash/minhash.c	10
 src/store/store.c	358
 src/ui/config.c	12
 src/ui/http_server.c	31

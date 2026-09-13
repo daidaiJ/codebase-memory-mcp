@@ -6,6 +6,7 @@
 #include "test_framework.h"
 #include "test_helpers.h"
 #include "../src/foundation/mem.h"
+#include "../src/foundation/platform.h" /* cbm_system_info, cbm_system_available_ram */
 #include "../src/foundation/mem_core.h"
 #include "../src/foundation/arena.h"
 #include "../src/foundation/slab_alloc.h"
@@ -1486,8 +1487,82 @@ TEST(mem_core_report_json_is_wellformed_or_empty) {
     PASS();
 }
 
+/* ── Pressure primitives and the charged reading ─────────────────────── */
+
+TEST(mem_charged_is_positive_and_consistent_with_rss) {
+    size_t charged = cbm_mem_charged();
+    size_t rss = cbm_mem_rss();
+    ASSERT(charged > 0);
+    ASSERT(rss > 0);
+    /* Same order of magnitude as RSS on every platform: the charged value
+     * may sit below RSS (purged-but-resident pages) or slightly above it
+     * (compressed pages), never at zero or at a multiple. */
+    ASSERT(charged < rss * 4);
+    ASSERT(rss < charged * 4 + (size_t)64 * 1024 * 1024);
+    PASS();
+}
+
+/* The charged high-water mark never reads below a charge just taken, and a
+ * later, larger charge lifts it: it is a max over every reading. */
+TEST(mem_peak_charged_is_the_high_water_of_charged) {
+    size_t charged = cbm_mem_charged();
+    ASSERT_TRUE(charged > 0);
+    ASSERT_TRUE(cbm_mem_peak_charged() >= charged);
+    size_t peak_before = cbm_mem_peak_charged();
+    (void)cbm_mem_charged();
+    ASSERT_TRUE(cbm_mem_peak_charged() >= peak_before);
+    PASS();
+}
+
+TEST(mem_footprint_zero_or_plausible) {
+    size_t fp = cbm_mem_footprint();
+    if (fp > 0) {
+        ASSERT(fp >= (size_t)1024 * 1024); /* a live test process is more than 1 MB */
+    }
+    PASS();
+}
+
+TEST(mem_system_available_ram_is_within_total) {
+    size_t avail = cbm_system_available_ram();
+    cbm_system_info_t info = cbm_system_info();
+    if (avail == 0 || info.total_ram == 0) {
+        PASS(); /* platform cannot answer; the caller treats that as unknown */
+    }
+    ASSERT(avail <= info.total_ram);
+    PASS();
+}
+
+TEST(mem_system_under_pressure_is_a_pure_threshold) {
+    size_t avail = cbm_system_available_ram();
+    cbm_system_info_t info = cbm_system_info();
+    bool under = cbm_mem_system_under_pressure();
+    if (avail == 0 || info.total_ram == 0) {
+        ASSERT_FALSE(under); /* never abort on a guess */
+        PASS();
+    }
+    ASSERT_EQ(under, avail < info.total_ram / 8);
+    PASS();
+}
+
+TEST(mem_over_budget_follows_the_charged_reading) {
+    size_t saved = cbm_mem_budget();
+    size_t charged = cbm_mem_charged();
+    ASSERT(charged > 0);
+    cbm_mem_set_budget_for_tests(charged * 4);
+    ASSERT_FALSE(cbm_mem_over_budget());
+    cbm_mem_set_budget_for_tests(charged / 4 + 1);
+    ASSERT_TRUE(cbm_mem_over_budget());
+    cbm_mem_set_budget_for_tests(saved);
+    PASS();
+}
+
 TEST(mem_core_class_names_are_total) {
     ASSERT_TRUE(strcmp(cbm_mem_class_name(CBM_MEM_CLASS_SEMANTIC), "semantic") == 0);
+    ASSERT_TRUE(strcmp(cbm_mem_class_name(CBM_MEM_CLASS_ARENA), "arena") == 0);
+    ASSERT_TRUE(strcmp(cbm_mem_class_name(CBM_MEM_CLASS_TS_TREE), "ts_tree") == 0);
+    ASSERT_TRUE(strcmp(cbm_mem_class_name(CBM_MEM_CLASS_STORE), "store") == 0);
+    ASSERT_TRUE(strcmp(cbm_mem_class_name(CBM_MEM_CLASS_HASH_TABLE), "hash_table") == 0);
+    ASSERT_TRUE(strcmp(cbm_mem_class_name(CBM_MEM_CLASS_DYN_ARRAY), "dyn_array") == 0);
     /* Out of range must still answer, so a log line never takes a NULL. */
     ASSERT_TRUE(cbm_mem_class_name((cbm_mem_class_t)(CBM_MEM_CLASS_COUNT + 5)) != NULL);
     ASSERT_TRUE(cbm_mem_class_name((cbm_mem_class_t)-1) != NULL);
@@ -1570,4 +1645,10 @@ SUITE(mem) {
     RUN_TEST(mem_core_mismatched_class_never_wraps);
     RUN_TEST(mem_core_report_json_is_wellformed_or_empty);
     RUN_TEST(mem_core_class_names_are_total);
+    RUN_TEST(mem_charged_is_positive_and_consistent_with_rss);
+    RUN_TEST(mem_peak_charged_is_the_high_water_of_charged);
+    RUN_TEST(mem_footprint_zero_or_plausible);
+    RUN_TEST(mem_system_available_ram_is_within_total);
+    RUN_TEST(mem_system_under_pressure_is_a_pure_threshold);
+    RUN_TEST(mem_over_budget_follows_the_charged_reading);
 }

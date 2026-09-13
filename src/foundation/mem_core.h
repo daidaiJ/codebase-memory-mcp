@@ -57,11 +57,15 @@ typedef enum {
     CBM_MEM_CLASS_GBUF_NODE,   /* node records (~64 B each) */
     CBM_MEM_CLASS_GBUF_EDGE,   /* edge records (~48 B each) */
     CBM_MEM_CLASS_GBUF_STRING, /* name / qualified_name / properties_json */
-    CBM_MEM_CLASS_GBUF_INDEX,  /* the 8 lookup indexes (~3.77 GB at kernel scale) */
-    CBM_MEM_CLASS_EXTRACT,     /* per-file working set: arena, tree, source */
-    CBM_MEM_CLASS_SEMANTIC,    /* embedding vectors (~9.4 GB at kernel scale) */
+    CBM_MEM_CLASS_GBUF_INDEX,  /* the 8 lookup indexes (383 MB peak on the Go corpus) */
+    CBM_MEM_CLASS_EXTRACT,     /* per-file working set: source text, extraction scratch */
+    CBM_MEM_CLASS_ARENA,       /* CBMArena blocks -- every arena, whoever owns it */
+    CBM_MEM_CLASS_TS_TREE,     /* tree-sitter: parse trees + parser state (bound allocator) */
+    CBM_MEM_CLASS_SEMANTIC,    /* semantic pass: vectors, token pools, LSH (87 MB on Go) */
     CBM_MEM_CLASS_DUMP,        /* dump-time transients */
-    CBM_MEM_CLASS_STORE,       /* store batches and row buffers */
+    CBM_MEM_CLASS_STORE,       /* SQLite (bound mem methods) + store batches and row buffers */
+    CBM_MEM_CLASS_HASH_TABLE,  /* CBMHashTable buckets/entries not claimed by an owner class */
+    CBM_MEM_CLASS_DYN_ARRAY,   /* CBM_DYN_ARRAY item storage (every cbm_da_* user) */
     CBM_MEM_CLASS_COUNT
 } cbm_mem_class_t;
 
@@ -97,6 +101,11 @@ void cbm_free(cbm_mem_class_t cls, void *block);
  * cbm_mem_tracked_live_bytes() versus the process RSS in mem.h: the gap between
  * them IS the unmigrated surface, and it should shrink as adoption spreads. An
  * unmeasured allocation must never read as an absent one. */
+/* Push this thread's pending accounting deltas to the shared counters. Every
+ * reader does it for its own thread; a parallel-for worker does it when its
+ * work item ends, so the phase marks (read after the join) are exact. */
+void cbm_mem_class_flush_thread(void);
+
 size_t cbm_mem_class_live_bytes(cbm_mem_class_t cls);
 size_t cbm_mem_class_live_blocks(cbm_mem_class_t cls);
 size_t cbm_mem_tracked_live_bytes(void);

@@ -24,7 +24,7 @@ audit already bit us once on exactly that with fork(.
 
 EXEMPT. The core itself and the allocator plumbing it sits on:
     src/foundation/mem_core.c        the route
-    src/foundation/arena.c           bulk allocator that reports INTO the core
+    (arena.c allocates its blocks THROUGH the core -- class arena -- and is scanned)
     src/foundation/slab_alloc.c      same
     src/foundation/mem.c             policy/measurement, probes with malloc
     src/foundation/mem_override_*.c  the --wrap / override shims
@@ -58,9 +58,7 @@ RAW = re.compile(r"(?<![A-Za-z0-9_])(malloc|calloc|realloc|free|strdup|strndup)\
 
 EXEMPT_EXACT = {
     "src/foundation/mem_core.c",
-    "src/foundation/arena.c",
-    "src/foundation/slab_alloc.c",
-    "src/foundation/mem.c",
+            "src/foundation/mem.c",
 }
 EXEMPT_PREFIX = (
     "src/foundation/mem_override_",
