@@ -113,6 +113,13 @@ bool cbm_daemon_ipc_listen_failure_detail(cbm_daemon_ipc_listen_failure_t *out);
 #ifdef CBM_ENABLE_TEST_SEAMS
 /* #1537: seed the detail so a test can prove the CLI refusal surfaces it. */
 void cbm_daemon_ipc_set_validation_detail_for_testing(const char *detail);
+#ifdef _WIN32
+/* #1705: run the daemon's directory-owner/ACE trust predicate against an
+ * arbitrary SID, so a test can assert THIS machine's built-in Administrator
+ * (RID-500) is trusted while a foreign S-1-5-21-*-500 is not. Returns false on
+ * any setup failure. Windows only. */
+bool cbm_daemon_ipc_win_sid_trusted_for_testing(void *sid);
+#endif
 #ifndef _WIN32
 /* #1830 seams (POSIX). Override the single-uid user-namespace overflow uid that
  * ancestors may be owned by (active=false restores the real /proc-derived
@@ -124,13 +131,12 @@ bool cbm_daemon_ipc_posix_uid_map_is_single_uid_for_test(const char *uid_map, un
 bool cbm_daemon_ipc_posix_ancestor_stat_ok_for_test(unsigned long owner, unsigned int mode,
                                                     unsigned long euid, bool overflow_active,
                                                     unsigned long overflow_uid);
+#if defined(__linux__)
+/* Number of REAL overflow-uid derivations so far. The value is meaningless on
+ * its own; the point is that it must rise on every ancestor check, proving no
+ * cache has crept back in. */
+unsigned cbm_daemon_ipc_posix_overflow_compute_count_for_test(void);
 #endif
-#ifdef _WIN32
-/* #1705: run the daemon's directory-owner/ACE trust predicate against an
- * arbitrary SID, so a test can assert THIS machine's built-in Administrator
- * (RID-500) is trusted while a foreign S-1-5-21-*-500 is not. Returns false on
- * any setup failure. Windows only. */
-bool cbm_daemon_ipc_win_sid_trusted_for_testing(void *sid);
 #endif
 #endif
 

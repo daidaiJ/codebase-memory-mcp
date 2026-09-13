@@ -5124,6 +5124,49 @@ TEST(daemon_ipc_posix_overflow_ancestor_tolerated_only_in_single_uid_ns_issue183
     PASS();
 }
 
+/* #1830 regression guard, and the test that would have caught the original bug
+ * with no namespace at all. The overflow uid used to be memoised per process
+ * via pthread_once. That made a SECURITY decision sticky: pthread_once state
+ * survives fork(), unshare(CLONE_NEWUSER) rewrites /proc/self/uid_map, so a
+ * process that forked and then entered a namespace kept the parent verdict.
+ * Nothing in the suite could see it, because every deterministic #1830 test
+ * drives the override seam rather than the real derivation -- they bind the
+ * decision TABLE, not the WIRING.
+ *
+ * So assert the wiring directly: two ancestor checks must perform two real
+ * derivations. Re-introduce any cache and the second call derives zero times
+ * and this fails by name, on every platform, with no namespace required. */
+TEST(daemon_ipc_posix_overflow_uid_is_never_cached_issue1830) {
+#if defined(__linux__)
+    char parent[TEST_PATH_CAP];
+    if (!ipc_test_parent_new(parent, "overflow-nocache")) {
+        FAIL("could not create the probe parent directory");
+    }
+    char probe[TEST_PATH_CAP];
+    (void)snprintf(probe, sizeof(probe), "%s/x", parent);
+
+    /* The override seam short-circuits derivation, so it must be OFF here or
+     * the test would measure nothing. */
+    cbm_daemon_ipc_posix_set_ancestor_overflow_uid_for_test(false, 0);
+
+    unsigned before = cbm_daemon_ipc_posix_overflow_compute_count_for_test();
+    (void)cbm_daemon_ipc_private_directory_secure(probe);
+    unsigned after_first = cbm_daemon_ipc_posix_overflow_compute_count_for_test();
+    (void)cbm_daemon_ipc_private_directory_secure(probe);
+    unsigned after_second = cbm_daemon_ipc_posix_overflow_compute_count_for_test();
+
+    (void)rmdir(probe);
+    ipc_test_remove_flat_dir(parent);
+
+    ASSERT_TRUE(after_first > before);
+    /* The decisive half: the SECOND call must derive again. */
+    ASSERT_TRUE(after_second > after_first);
+    PASS();
+#else
+    SKIP_PLATFORM("the overflow-uid derivation is Linux-only");
+#endif
+}
+
 /* #1830 real end-to-end smoke: inside a single-uid user namespace the
  * root-owned ancestors (/, /tmp) are overflow-owned, and the daemon must still
  * create its private directory there. An overflow-owned ancestor cannot be
@@ -5131,7 +5174,12 @@ TEST(daemon_ipc_posix_overflow_ancestor_tolerated_only_in_single_uid_ns_issue183
  * namespace is actually available. O10 whitelisted-skip everywhere it is not:
  * macOS has no user namespaces (compile-gated out); Docker's default seccomp
  * blocks unshare(CLONE_NEWUSER) on the Colima container leg; some kernels ship
- * user namespaces disabled. WHAT WAS TRIED when it skips: fork + unshare
+ * user namespaces disabled. NOT on that list any more: Ubuntu 23.10+ restricts
+ * unprivileged userns via AppArmor, which used to confine this test to the two
+ * ubuntu-22.04 legs -- broad-matrix only, so it ran in no PR and sat on
+ * GitHub's 2027-04-17 retirement clock. _test.yml now lifts that with
+ * kernel.apparmor_restrict_unprivileged_userns=0 on every ubuntu leg, so this
+ * runs on the CORE matrix. WHAT WAS TRIED when it skips: fork + unshare
  * CLONE_NEWUSER + a 1:1 uid_map write, which the sandbox denied (EPERM). The
  * deterministic decision coverage above is what binds the fix.
  *
@@ -5346,6 +5394,7 @@ SUITE(daemon_ipc) {
 #ifdef CBM_ENABLE_TEST_SEAMS
     RUN_TEST(daemon_ipc_posix_uid_map_single_uid_parse_issue1830);
     RUN_TEST(daemon_ipc_posix_overflow_ancestor_tolerated_only_in_single_uid_ns_issue1830);
+    RUN_TEST(daemon_ipc_posix_overflow_uid_is_never_cached_issue1830);
     RUN_TEST(daemon_ipc_posix_single_uid_userns_real_smoke_issue1830);
 #endif
     RUN_TEST(daemon_ipc_posix_startup_lock_is_cross_process);
