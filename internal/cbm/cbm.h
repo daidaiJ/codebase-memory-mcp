@@ -669,6 +669,12 @@ typedef struct {
 // also calls it so non-main entry points (pipeline passes) still get the binds.
 // In the test build (no CBM_BIND_TS_ALLOCATOR) this is a no-op.
 void cbm_alloc_init(void);
+/* SQLite allocates from a dedicated mimalloc heap per thread while on; the
+ * index worker turns it on (its default heap holds the graph). Off elsewhere:
+ * a thread-per-connection daemon would pin connection-lifetime blocks to
+ * dead threads. The switch exists in every build; it changes nothing where
+ * the allocator binds are compiled out. */
+void cbm_sqlite_dedicated_heap(bool on);
 
 // Initialize the library. Call once at startup. Returns 0 on success.
 int cbm_init(void);

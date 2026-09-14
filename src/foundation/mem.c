@@ -515,6 +515,15 @@ void cbm_mem_set_budget_for_tests(size_t bytes) {
 size_t cbm_mem_allocator_committed(void) {
     size_t commit = 0;
     mi_process_info(NULL, NULL, NULL, NULL, NULL, &commit, NULL, NULL);
+    /* The statistic behind this is a signed counter merged per thread at
+     * thread exit; a process whose long-lived thread commits what its
+     * short-lived threads free reads it NEGATIVE, cast to size_t here. The
+     * daemon's query-leak soak reported 2^64 - 121 MB from the second sample
+     * on (Linux, 2026-09-14). A negative reading is no reading: report 0 so
+     * the charge falls back to the OS number instead of a 16 EB budget breach. */
+    if (commit > (SIZE_MAX >> 1)) {
+        return 0;
+    }
     return commit;
 }
 

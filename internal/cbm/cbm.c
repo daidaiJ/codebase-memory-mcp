@@ -300,6 +300,20 @@ static TSParser *get_thread_parser(const TSLanguage *ts_lang, CBMLanguage lang) 
  * to mimalloc would mismatch ASan/CRT frees — there these binds compile to
  * no-ops and the build stays unchanged. */
 
+/* SQLite on a dedicated mimalloc heap per thread: ON only in the index worker,
+ * whose default heap holds the graph (SQLite churn on that heap paid a page
+ * walk per allocation: 132 s vs 9.7 s on the kernel's coverage publish). OFF
+ * everywhere else: the daemon runs a thread per connection, and a heap
+ * created per such thread pins every SQLite block the shared connection
+ * keeps (page cache, statement cache) to pages nobody's heap owns any more --
+ * the Linux soak grew 180 KB per query, 11 -> 144 MB in ten minutes, where
+ * the default thread heap had been flat (2026-09-14). */
+static _Atomic int g_sqlite_dedicated_heap;
+
+void cbm_sqlite_dedicated_heap(bool on) {
+    atomic_store_explicit(&g_sqlite_dedicated_heap, on ? 1 : 0, memory_order_relaxed);
+}
+
 #if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
 #include <assert.h>
 
@@ -322,15 +336,20 @@ static TSParser *get_thread_parser(const TSLanguage *ts_lang, CBMLanguage lang) 
  * thread's heap is released with the thread. */
 static _Thread_local mi_heap_t *tl_sqlite_heap;
 
+/* NULL = the calling thread's default heap (mi_malloc); see the switch above. */
 static mi_heap_t *sqlite_heap(void) {
+    if (!atomic_load_explicit(&g_sqlite_dedicated_heap, memory_order_relaxed)) {
+        return NULL;
+    }
     if (!tl_sqlite_heap) {
         tl_sqlite_heap = mi_heap_new();
     }
-    return tl_sqlite_heap ? tl_sqlite_heap : mi_heap_main();
+    return tl_sqlite_heap;
 }
 
 static void *cbm_sqlite_malloc(int n) {
-    void *block = mi_heap_malloc(sqlite_heap(), (size_t)n);
+    mi_heap_t *heap = sqlite_heap();
+    void *block = heap ? mi_heap_malloc(heap, (size_t)n) : mi_malloc((size_t)n);
     if (block) {
         cbm_mem_class_add_external(CBM_MEM_CLASS_STORE, mi_usable_size(block));
     }
@@ -344,7 +363,8 @@ static void cbm_sqlite_free(void *p) {
 }
 static void *cbm_sqlite_realloc(void *p, int n) {
     size_t old_size = p ? mi_usable_size(p) : 0;
-    void *grown = mi_heap_realloc(sqlite_heap(), p, (size_t)n);
+    mi_heap_t *heap = sqlite_heap();
+    void *grown = heap ? mi_heap_realloc(heap, p, (size_t)n) : mi_realloc(p, (size_t)n);
     if (grown) {
         cbm_mem_class_remove_external(CBM_MEM_CLASS_STORE, old_size);
         cbm_mem_class_add_external(CBM_MEM_CLASS_STORE, mi_usable_size(grown));
