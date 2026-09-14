@@ -910,7 +910,7 @@ static char *activation_posix_walk_path(const char *directory) {
         struct stat alias_status;
         char resolved[4096];
         if (lstat(alias, &alias_status) != 0) {
-            return NULL;
+            continue;
         }
         if (!S_ISLNK(alias_status.st_mode)) {
             continue;
