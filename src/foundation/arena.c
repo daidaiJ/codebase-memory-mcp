@@ -45,6 +45,15 @@ void cbm_arena_init_exact(CBMArena *a, size_t bytes) {
     size_t block = (bytes + ARENA_ALIGN) & ~(size_t)ARENA_ALIGN;
     cbm_arena_init_sized(a, block);
     a->grow_size = CBM_ARENA_DEFAULT_BLOCK_SIZE;
+    /* An exact block is a compacted result's image and may be written to
+     * disk whole (result_spill): the alignment gaps between objects and the
+     * padding inside structs are never written by the copy, and MemorySanitizer
+     * refuses an fwrite of uninitialized bytes (CI MSan lane on #2202, offset
+     * 4087 of a 6,952-byte block). Zeroed once here, every byte of the image
+     * is defined; the cost is one pass over memory the copy is about to touch. */
+    if (a->blocks[0]) {
+        memset(a->blocks[0], 0, a->block_sizes[0]);
+    }
 }
 
 static int arena_grow(CBMArena *a, size_t min_size) {

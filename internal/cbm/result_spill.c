@@ -21,6 +21,24 @@
 #include "foundation/log.h"
 #include "foundation/mem_core.h"
 
+/* The park writes a result as an opaque image: the record header (a struct
+ * copy) and the compacted arena block. Both carry padding bytes no code ever
+ * wrote -- inside structs, between objects -- and MemorySanitizer tracks
+ * that mark through the compaction's memcpy, so it refuses the fwrite of an
+ * image that is read back whole and never interpreted byte by byte (CI MSan
+ * lane on #2202: offset 4087, then 6714, of a 6,952-byte block). Under MSan
+ * the image is declared defined right before the write; every other build
+ * compiles this to nothing. */
+#if defined(__has_feature)
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+#define SPILL_IMAGE_DEFINED(p, n) __msan_unpoison((p), (n))
+#endif
+#endif
+#ifndef SPILL_IMAGE_DEFINED
+#define SPILL_IMAGE_DEFINED(p, n) ((void)0)
+#endif
+
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,6 +151,8 @@ bool cbm_result_spill_park(cbm_result_spill_t *sp, int writer, int slot, CBMFile
     hdr.old_base = (uint64_t)(uintptr_t)result->arena.blocks[0];
     hdr.header = *result;
     hdr.header.cached_tree = NULL; /* never on disk: the loader gets no tree */
+    SPILL_IMAGE_DEFINED(&hdr, sizeof(hdr));
+    SPILL_IMAGE_DEFINED(result->arena.blocks[0], hdr.block_len);
     cbm_mutex_lock(&f->mu);
     uint64_t offset = f->end;
     bool ok = SPILL_SEEK(f->fp, offset) == 0 && fwrite(&hdr, sizeof(hdr), 1, f->fp) == 1 &&
