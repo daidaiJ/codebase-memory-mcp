@@ -18,6 +18,7 @@ enum { ARENA_ALIGN = 7, ARENA_GROW_OK = 1 };
 #include <string.h>
 #include <stdarg.h>
 #if defined(__APPLE__)
+#include <pthread.h>
 #include <xlocale.h>
 #endif
 #include <stdio.h>
@@ -144,10 +145,30 @@ char *cbm_arena_strndup(CBMArena *a, const char *s, size_t len) {
  * object of its own, so no thread ever waits for another, and the common
  * short string is formatted once into a stack buffer. */
 #if defined(__APPLE__)
+/* One locale object per thread, freed when the thread exits: the object is
+ * heap memory that the thread-local pointer alone kept, so every worker
+ * thread that ever formatted a name leaked 1,472 bytes at exit (the macOS
+ * LSan lane on PR #2202, 16-101 objects per test process). A pthread key
+ * destructor is the one hook that runs at thread exit for a TLS-held
+ * resource; the main thread keeps its locale until process exit. */
 static _Thread_local locale_t tl_c_locale;
+static pthread_key_t tl_c_locale_key;
+static pthread_once_t tl_c_locale_once = PTHREAD_ONCE_INIT;
+static void arena_c_locale_free(void *loc) {
+    if (loc) {
+        freelocale((locale_t)loc);
+    }
+}
+static void arena_c_locale_key_init(void) {
+    (void)pthread_key_create(&tl_c_locale_key, arena_c_locale_free);
+}
 static locale_t arena_c_locale(void) {
     if (!tl_c_locale) {
         tl_c_locale = newlocale(LC_ALL_MASK, "C", NULL);
+        if (tl_c_locale) {
+            pthread_once(&tl_c_locale_once, arena_c_locale_key_init);
+            (void)pthread_setspecific(tl_c_locale_key, tl_c_locale);
+        }
     }
     return tl_c_locale; /* NULL = the global locale, the pre-fix behaviour */
 }

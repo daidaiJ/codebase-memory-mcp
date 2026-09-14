@@ -1020,6 +1020,7 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
                     pp_spill_enter(ec, "near_budget");
                 }
             }
+            bool settling = false;
             if (over) {
                 /* Admission control, first response: park what can be parked.
                  * Only what is still over budget after that -- the floor --
@@ -1030,6 +1031,7 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
                 over = cbm_mem_over_budget();
                 if (over && pp_spill_active(ec) && (parked > 0 || pp_spill_work_remains(ec))) {
                     over = false; /* memory is still on its way down */
+                    settling = true;
                 }
             }
             bool futile = atomic_load_explicit(&ec->bp_futile, memory_order_relaxed) != 0;
@@ -1046,7 +1048,13 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
                         atomic_store_explicit(&ec->bp_futile, 0, memory_order_relaxed);
                     }
                 }
-            } else if (!over && futile) {
+            } else if (!over && !settling && futile) {
+                /* Re-arm only on a genuine under-budget reading. A reading the
+                 * spill shortcut produced ("still on its way down") is not
+                 * one: re-arming on it made the next over-budget pull pay a
+                 * full nap cycle again -- the gate re-paid per pull that
+                 * pipeline_backpressure_futile_nap_disengages guards against
+                 * (TSan lane on PR #2202: 8 cycles against a bound of 7). */
                 atomic_store_explicit(&ec->bp_futile, 0, memory_order_relaxed);
             }
         }
