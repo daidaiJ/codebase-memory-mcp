@@ -80,6 +80,7 @@ enum { PP_CSHARP_M_PREFIX_LEN = 2 };
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"
+#include "foundation/mem_core.h"
 #include "graph_buffer/graph_buffer.h"
 #include "service_patterns.h"
 #include "foundation/platform.h"
@@ -931,6 +932,36 @@ static int pp_spill_sweep(extract_ctx_t *ec, int worker_id) {
     return parked;
 }
 
+/* Diagnostic (CBM_MEM_PHASES=1): where does the charge go between the
+ * near-budget latch and the first over-budget observation? One line per
+ * 256 MB step of the charge above its last logged value while spill mode is
+ * on, and one at the first over-budget observation, each with the
+ * footprint / commit / tracked breakdown and the class table. */
+static _Atomic size_t g_probe_last_mb = 0;
+static _Atomic int g_probe_over_logged = 0;
+static void pp_charge_probe(extract_ctx_t *ec, bool over) {
+    if (!cbm_mem_phases_enabled() || !pp_spill_active(ec)) {
+        return;
+    }
+    enum { PROBE_STEP_MB = 256, PROBE_MB = 1024 * 1024 };
+    size_t charged_mb = cbm_mem_charged() / PROBE_MB;
+    size_t last = atomic_load_explicit(&g_probe_last_mb, memory_order_relaxed);
+    bool step = charged_mb >= last + PROBE_STEP_MB &&
+                atomic_compare_exchange_strong_explicit(&g_probe_last_mb, &last, charged_mb,
+                                                        memory_order_relaxed, memory_order_relaxed);
+    bool first_over =
+        over && atomic_exchange_explicit(&g_probe_over_logged, 1, memory_order_relaxed) == 0;
+    if (!step && !first_over) {
+        return;
+    }
+    cbm_log_info("mem.charge.probe", "event", first_over ? "first_over" : "step", "charged_mb",
+                 itoa_log((int)charged_mb), "footprint_mb",
+                 itoa_log((int)(cbm_mem_footprint() / PROBE_MB)), "commit_mb",
+                 itoa_log((int)(cbm_mem_allocator_committed() / PROBE_MB)), "tracked_mb",
+                 itoa_log((int)(cbm_mem_tracked_live_bytes() / PROBE_MB)));
+    cbm_mem_class_log(first_over ? "charge.first_over" : "charge.step");
+}
+
 static void extract_worker(int worker_id, void *ctx_ptr) {
     extract_ctx_t *ec = ctx_ptr;
     extract_worker_state_t *ws = &ec->workers[worker_id];
@@ -974,6 +1005,7 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
          * and the previously serving index keeps answering. */
         if (cbm_mem_budget() > 0) {
             bool over = cbm_mem_over_budget();
+            pp_charge_probe(ec, over);
             /* Anticipation: the gate sees the crossing per file pull, and the
              * workers' in-flight files carry the charge past the line before
              * the first sweep lands (kernel, 15 GB budget: high-water 15.65
@@ -1401,6 +1433,19 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
     cbm_parallel_for_opts_t parallel_opts = {.max_workers = worker_count, .force_pthreads = false};
     cbm_scale_begin(&ec.scale, "parallel_extract", (long)file_count);
     cbm_parallel_for(worker_count, extract_worker, &ec, parallel_opts);
+    if (pp_spill_active(&ec) &&
+        !atomic_load_explicit(&ec.over_budget_abort, memory_order_relaxed)) {
+        /* Spill mode was entered, so results belong on disk: park every
+         * result still cached before the phases that cannot park (registry
+         * build, resolve, the semantic pass) inherit them. The sweeps above
+         * run only on an over-budget observation; a run that latched early
+         * and then stayed under budget through extraction (kernel, 15 GB,
+         * 2026-09-14: 14,949 MB at this point, 44,797 results = 8 GB still
+         * cached) reached resolve with no headroom and aborted there. */
+        int parked = pp_spill_sweep(&ec, 0);
+        cbm_log_info("mem.spill.final_sweep", "parked", itoa_log(parked), "charged_mb",
+                     itoa_log((int)(cbm_mem_charged() / ((size_t)1024 * 1024))));
+    }
     if (ctx->spill) {
         int64_t parked = 0;
         int64_t bytes = 0;

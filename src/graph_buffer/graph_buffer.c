@@ -98,6 +98,10 @@ struct cbm_gbuf {
      * strings at kernel scale, plus a snprintf+strdup+hash on every one of
      * the ~18 hot find_by_id call sites. */
     cbm_gbuf_node_t **by_id;
+    /* Worker buffers (cbm_gbuf_new_worker) keep no by_id array: their ids
+     * come from the shared counter, so a dense array would span the whole
+     * global id space in every worker and double in lockstep. */
+    bool by_id_off;
     int64_t by_id_cap;
 
     /* Secondary node indexes */
@@ -485,21 +489,23 @@ static void cascade_delete_edges(cbm_gbuf_t *gb, CBMHashTable *deleted_set) {
 static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
     cbm_ht_set(gb->node_by_qn, node->qualified_name, node);
 
-    if (node->id >= gb->by_id_cap) {
-        int64_t nc = gb->by_id_cap > 0 ? gb->by_id_cap : CBM_SZ_1K;
-        while (nc <= node->id) {
-            nc *= 2;
+    if (!gb->by_id_off) {
+        if (node->id >= gb->by_id_cap) {
+            int64_t nc = gb->by_id_cap > 0 ? gb->by_id_cap : CBM_SZ_1K;
+            while (nc <= node->id) {
+                nc *= 2;
+            }
+            cbm_gbuf_node_t **grown =
+                cbm_realloc(CBM_MEM_CLASS_GBUF_INDEX, gb->by_id, (size_t)nc * sizeof(*grown));
+            if (grown) {
+                memset(grown + gb->by_id_cap, 0, (size_t)(nc - gb->by_id_cap) * sizeof(*grown));
+                gb->by_id = grown;
+                gb->by_id_cap = nc;
+            }
         }
-        cbm_gbuf_node_t **grown =
-            cbm_realloc(CBM_MEM_CLASS_GBUF_INDEX, gb->by_id, (size_t)nc * sizeof(*grown));
-        if (grown) {
-            memset(grown + gb->by_id_cap, 0, (size_t)(nc - gb->by_id_cap) * sizeof(*grown));
-            gb->by_id = grown;
-            gb->by_id_cap = nc;
+        if (node->id >= 0 && node->id < gb->by_id_cap) {
+            gb->by_id[node->id] = node;
         }
-    }
-    if (node->id >= 0 && node->id < gb->by_id_cap) {
-        gb->by_id[node->id] = node;
     }
 
     node_ptr_array_t *by_label =
@@ -652,6 +658,16 @@ cbm_gbuf_t *cbm_gbuf_new_worker(const char *project, const char *root_path,
     gb->edges_by_source_type = NULL;
     gb->edges_by_target_type = NULL;
     gb->edges_by_type = NULL;
+    /* Nor by id: with ids from the shared counter, a dense id -> node array
+     * in every worker spans the whole global id space (8.5M ids x 8 B x 18
+     * workers on the kernel) and all of them double in the same instant --
+     * a 1 GB step between two reads of the memory gate, which is where the
+     * 15 GB budget was missed (2026-09-14). Nothing asks a worker buffer by
+     * id before the merge; the main buffer answers after it. */
+    cbm_free(CBM_MEM_CLASS_GBUF_INDEX, gb->by_id);
+    gb->by_id = NULL;
+    gb->by_id_cap = 0;
+    gb->by_id_off = true;
     return gb;
 }
 
