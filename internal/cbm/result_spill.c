@@ -29,13 +29,11 @@
  * lane on #2202: offset 4087, then 6714, of a 6,952-byte block). Under MSan
  * the image is declared defined right before the write; every other build
  * compiles this to nothing. */
-#if defined(__has_feature)
+#include "foundation/sanitized.h" /* __has_feature exists everywhere, cppcheck included */
 #if __has_feature(memory_sanitizer)
 #include <sanitizer/msan_interface.h>
 #define SPILL_IMAGE_DEFINED(p, n) __msan_unpoison((p), (n))
-#endif
-#endif
-#ifndef SPILL_IMAGE_DEFINED
+#else
 #define SPILL_IMAGE_DEFINED(p, n) ((void)0)
 #endif
 
