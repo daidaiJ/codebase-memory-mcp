@@ -895,7 +895,11 @@ static char *activation_posix_walk_path(const char *directory) {
      * root-owned aliases (for example /tmp and /home on Atomic systems).
      * Resolve only these trusted system aliases; arbitrary user symlinks must
      * still fail the O_NOFOLLOW walk below. */
+#ifdef __linux__
     static const char *const aliases[] = {"/tmp", "/var", "/home"};
+#else
+    static const char *const aliases[] = {"/tmp", "/var"};
+#endif
     for (size_t index = 0; index < sizeof(aliases) / sizeof(aliases[0]); index++) {
         const char *alias = aliases[index];
         size_t alias_length = strlen(alias);
