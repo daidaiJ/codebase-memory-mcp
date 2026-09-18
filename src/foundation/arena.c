@@ -43,8 +43,7 @@ static void arena_waste_report(const CBMArena *a) {
     uint64_t current_rest = a->block_size > a->used ? a->block_size - a->used : 0;
     uint64_t wasted = a->waste_tail + current_rest + unreached;
     uint64_t used = capacity > wasted ? capacity - wasted : 0;
-    cbm_memev_container(CBM_WORK_CT_ARENA, a->waste_site, capacity, used,
-                        (uint64_t)a->waste_grows);
+    cbm_memev_container(CBM_WORK_CT_ARENA, a->waste_site, capacity, used, (uint64_t)a->waste_grows);
 }
 #define ARENA_SITE() __builtin_return_address(0)
 #else

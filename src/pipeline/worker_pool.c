@@ -88,11 +88,11 @@ static void run_pthreads_counted(int count, cbm_parallel_fn fn, void *ctx, int n
                                  void *site) {
     _Atomic int next_idx = 0;
     pthread_worker_arg_t wa = {.fn = fn, .ctx = ctx, .next_idx = &next_idx, .count = count};
-    cbm_thread_t *threads = (cbm_thread_t *)malloc((size_t)nworkers * sizeof(cbm_thread_t));
-    wp_counted_arg_t *args = (wp_counted_arg_t *)calloc((size_t)nworkers, sizeof(*args));
+    cbm_thread_t *threads = cbm_alloc(CBM_MEM_CLASS_OTHER, (size_t)nworkers * sizeof(cbm_thread_t));
+    wp_counted_arg_t *args = cbm_calloc(CBM_MEM_CLASS_OTHER, (size_t)nworkers * sizeof(*args));
     if (!threads || !args) {
-        free(threads);
-        free(args);
+        cbm_free(CBM_MEM_CLASS_OTHER, threads);
+        cbm_free(CBM_MEM_CLASS_OTHER, args);
         run_serial(count, fn, ctx);
         return;
     }
@@ -137,8 +137,8 @@ static void run_pthreads_counted(int count, cbm_parallel_fn fn, void *ctx, int n
     cbm_work_note(CBM_WORK_PARALLEL_FOR, site, (uint64_t)count, imbalance, (uint64_t)participants);
     cbm_work_note(CBM_WORK_POOL_OPS, site, sum_ops, (uint64_t)participants * max_ops - sum_ops,
                   (uint64_t)participants);
-    free(threads);
-    free(args);
+    cbm_free(CBM_MEM_CLASS_OTHER, threads);
+    cbm_free(CBM_MEM_CLASS_OTHER, args);
 }
 #endif
 

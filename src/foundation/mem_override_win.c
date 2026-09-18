@@ -73,12 +73,12 @@ static inline bool mem_override_is_ours(const void *block) {
  * caller's return address is the allocation site. Compiled to nothing outside
  * the `memwaste` flavour. Frees are reported BEFORE the block goes back. */
 #if defined(CBM_MEMWASTE) && CBM_MEMWASTE
-#define OBS_ALLOC_F(block, requested, flags)                                        \
-    do {                                                                            \
-        if ((block) && cbm_memev_enabled()) {                                       \
-            cbm_memev_alloc_ex((block), (requested), mi_usable_size(block),         \
-                               __builtin_return_address(0), (unsigned)(flags));     \
-        }                                                                           \
+#define OBS_ALLOC_F(block, requested, flags)                                    \
+    do {                                                                        \
+        if ((block) && cbm_memev_enabled()) {                                   \
+            cbm_memev_alloc_ex((block), (requested), mi_usable_size(block),     \
+                               __builtin_return_address(0), (unsigned)(flags)); \
+        }                                                                       \
     } while (0)
 #define OBS_ALLOC(block, requested) OBS_ALLOC_F((block), (requested), 0)
 #define OBS_REALLOC(old_block, grown, requested)                                        \
@@ -90,7 +90,7 @@ static inline bool mem_override_is_ours(const void *block) {
     } while (0)
 /* A block mimalloc did not make came from the CRT or a system DLL: the layer
  * could never have seen its allocation, so it is not an untracked free. */
-#define OBS_FREE(block)                                                             \
+#define OBS_FREE(block) \
     (mem_override_is_ours(block) ? cbm_memev_free(block) : cbm_memev_free_foreign(block))
 #else
 #define OBS_ALLOC(block, requested) ((void)0)

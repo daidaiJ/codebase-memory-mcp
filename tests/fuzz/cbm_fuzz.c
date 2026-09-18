@@ -146,9 +146,10 @@ static void fuzz_config(const uint8_t *data, size_t size) {
     }
     switch (data[0]) {
     case 't':
-        (void)cbm_toml_upsert_managed_block(path, "# BEGIN codebase-memory", "# END codebase-memory",
-                                            "owned = true\n");
-        (void)cbm_toml_remove_managed_block(path, "# BEGIN codebase-memory", "# END codebase-memory");
+        (void)cbm_toml_upsert_managed_block(path, "# BEGIN codebase-memory",
+                                            "# END codebase-memory", "owned = true\n");
+        (void)cbm_toml_remove_managed_block(path, "# BEGIN codebase-memory",
+                                            "# END codebase-memory");
         break;
     case 'y':
         (void)cbm_yaml_upsert_mapping_entry(path, "mcp_servers", "codebase-memory",

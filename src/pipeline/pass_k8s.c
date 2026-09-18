@@ -53,7 +53,7 @@ static char *k8s_read_file(const char *path, int *out_len) {
 
     /* +pad: tree-sitter lexer lookahead reads past EOF; keep it in-bounds */
     enum { CBM_TS_LOOKAHEAD_PAD = 16 };
-    char *buf = malloc((size_t)size + CBM_TS_LOOKAHEAD_PAD);
+    char *buf = cbm_alloc(CBM_MEM_CLASS_OTHER, (size_t)size + CBM_TS_LOOKAHEAD_PAD);
     if (!buf) {
         (void)fclose(f);
         return NULL;
@@ -362,8 +362,8 @@ static void k8s_link_selectors(cbm_pipeline_ctx_t *ctx, const k8s_record_array_t
  * must free after this call returns).  When `rec` is non-NULL it is populated
  * with the first Resource's node id, name and label/selector values for later
  * cross-manifest selector matching. */
-static void handle_k8s_manifest(cbm_pipeline_ctx_t *ctx, const char *rel_path,
-                                const char *source, const CBMFileResult *res, k8s_record_t *rec) {
+static void handle_k8s_manifest(cbm_pipeline_ctx_t *ctx, const char *rel_path, const char *source,
+                                const CBMFileResult *res, k8s_record_t *rec) {
     int resource_count = 0;
 
     if (!res) {
@@ -651,9 +651,9 @@ static void k8s_prep_file(const k8s_prep_job_t *job, int i, k8s_prep_t *out) {
             int src_len = 0;
             char *source = k8s_read_file(path, &src_len);
             if (source) {
-                out->res = cbm_extract_file(source, src_len, CBM_LANG_KUSTOMIZE,
-                                            ctx->project_name, rel, CBM_EXTRACT_BUDGET, NULL, NULL);
-                free(source);
+                out->res = cbm_extract_file(source, src_len, CBM_LANG_KUSTOMIZE, ctx->project_name,
+                                            rel, CBM_EXTRACT_BUDGET, NULL, NULL);
+                cbm_free(CBM_MEM_CLASS_OTHER, source);
             }
         }
     } else if (lang == CBM_LANG_YAML || lang == CBM_LANG_K8S) {
@@ -672,7 +672,7 @@ static void k8s_prep_file(const k8s_prep_job_t *job, int i, k8s_prep_t *out) {
             out->res = cbm_extract_file(out->source, out->src_len, CBM_LANG_K8S, ctx->project_name,
                                         rel, CBM_EXTRACT_BUDGET, NULL, NULL);
         } else {
-            free(out->source);
+            cbm_free(CBM_MEM_CLASS_OTHER, out->source);
             out->source = NULL;
         }
     }
@@ -707,12 +707,12 @@ int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
 
     /* Collect per-manifest selector/label records for cross-manifest matching. */
     k8s_record_array_t recs = {0};
-    recs.items = calloc(K8S_MAX_RECORDS, sizeof(*recs.items));
+    recs.items = cbm_calloc(CBM_MEM_CLASS_OTHER, K8S_MAX_RECORDS * sizeof(*recs.items));
     recs.cap = recs.items ? K8S_MAX_RECORDS : 0;
 
-    k8s_prep_t *prep = calloc(K8S_CHUNK, sizeof(*prep));
+    k8s_prep_t *prep = cbm_calloc(CBM_MEM_CLASS_OTHER, K8S_CHUNK * sizeof(*prep));
     if (!prep) {
-        free(recs.items);
+        cbm_free(CBM_MEM_CLASS_OTHER, recs.items);
         return CBM_NOT_FOUND;
     }
     int workers = cbm_default_worker_count(false);
@@ -720,15 +720,16 @@ int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
     for (int begin = 0; begin < file_count; begin += K8S_CHUNK) {
         int end = begin + K8S_CHUNK < file_count ? begin + K8S_CHUNK : file_count;
         if (cbm_pipeline_check_cancel(ctx)) {
-            free(prep);
-            free(recs.items);
+            cbm_free(CBM_MEM_CLASS_OTHER, prep);
+            cbm_free(CBM_MEM_CLASS_OTHER, recs.items);
             return CBM_NOT_FOUND;
         }
         memset(prep, 0, (size_t)K8S_CHUNK * sizeof(*prep));
         k8s_prep_job_t job = {.ctx = ctx, .files = files, .prep = prep, .begin = begin, .end = end};
         atomic_init(&job.next, begin);
-        cbm_parallel_for(workers, k8s_prep_worker, &job,
-                         (cbm_parallel_for_opts_t){.max_workers = workers, .force_pthreads = false});
+        cbm_parallel_for(
+            workers, k8s_prep_worker, &job,
+            (cbm_parallel_for_opts_t){.max_workers = workers, .force_pthreads = false});
 
         bool cancelled = false;
         for (int i = begin; i < end; i++) {
@@ -755,8 +756,7 @@ int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
                     helm_count++;
                     break;
                 case K8S_MANIFEST: {
-                    k8s_record_t *rec =
-                        (recs.count < recs.cap) ? &recs.items[recs.count] : NULL;
+                    k8s_record_t *rec = (recs.count < recs.cap) ? &recs.items[recs.count] : NULL;
                     handle_k8s_manifest(ctx, rel, p->source, p->res, rec);
                     if (rec && rec->node_id > 0) {
                         recs.count++;
@@ -769,22 +769,22 @@ int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
                     break;
                 }
             }
-            free(p->source);
+            cbm_free(CBM_MEM_CLASS_OTHER, p->source);
             if (p->res) {
                 cbm_free_result(p->res);
             }
         }
         if (cancelled) {
-            free(prep);
-            free(recs.items);
+            cbm_free(CBM_MEM_CLASS_OTHER, prep);
+            cbm_free(CBM_MEM_CLASS_OTHER, recs.items);
             return CBM_NOT_FOUND;
         }
     }
-    free(prep);
+    cbm_free(CBM_MEM_CLASS_OTHER, prep);
 
     /* Connect Services to the workloads their selectors target (INFRA_MAPS). */
     k8s_link_selectors(ctx, &recs);
-    free(recs.items);
+    cbm_free(CBM_MEM_CLASS_OTHER, recs.items);
 
     cbm_log_info("pass.done", "pass", "k8s", "kustomize", itoa_k8s(kustomize_count), "manifests",
                  itoa_k8s(manifest_count));

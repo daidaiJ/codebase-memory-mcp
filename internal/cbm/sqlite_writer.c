@@ -15,8 +15,8 @@
 //   - Varints: 1-9 bytes, big-endian, MSB continuation
 
 #include "sqlite_writer.h"
-#include "foundation/arena.h"    /* index-cell arena */
-#include "foundation/compat.h"   /* CBM_TLS */
+#include "foundation/arena.h"  /* index-cell arena */
+#include "foundation/compat.h" /* CBM_TLS */
 #include "foundation/constants.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"

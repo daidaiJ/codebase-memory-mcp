@@ -301,8 +301,7 @@ TEST(resolve_qualified_disambiguates_same_name) {
     ASSERT_TRUE(!nomatch.strategy || strcmp(nomatch.strategy, "qualified_suffix") != 0);
 
     /* A bare call stays ambiguous (no qualifier → no disambiguation signal). */
-    cbm_resolution_t bare =
-        cbm_registry_resolve(r, "save", "proj.lib.App.Caller", NULL, NULL, 0);
+    cbm_resolution_t bare = cbm_registry_resolve(r, "save", "proj.lib.App.Caller", NULL, NULL, 0);
     ASSERT_TRUE(!bare.strategy || strcmp(bare.strategy, "qualified_suffix") != 0);
 
     cbm_registry_free(r);
@@ -826,26 +825,26 @@ TEST(cross_language_suffix_match_drops_py_vs_js) {
      * strategy that collapses them; unique_name is #1572 and must stay. */
     ASSERT_TRUE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "web/src/pages/Editor.js",
                                                          "suffix_match"));
-    ASSERT_TRUE(cbm_suppress_cross_language_suffix_match(CBM_LANG_JAVASCRIPT, "store.py",
-                                                         "suffix_match"));
-    ASSERT_TRUE(cbm_suppress_cross_language_suffix_match(CBM_LANG_BASH, "cli/main.py",
-                                                         "suffix_match"));
-    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "store.py",
-                                                          "suffix_match"));
-    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "web/src/pages/Editor.js",
-                                                          "unique_name"));
-    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "web/src/pages/Editor.js",
-                                                          "same_module"));
-    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "web/src/pages/Editor.js",
-                                                          "import_map"));
+    ASSERT_TRUE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_JAVASCRIPT, "store.py", "suffix_match"));
+    ASSERT_TRUE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_BASH, "cli/main.py", "suffix_match"));
+    ASSERT_FALSE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "store.py", "suffix_match"));
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(
+        CBM_LANG_PYTHON, "web/src/pages/Editor.js", "unique_name"));
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(
+        CBM_LANG_PYTHON, "web/src/pages/Editor.js", "same_module"));
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON,
+                                                          "web/src/pages/Editor.js", "import_map"));
     /* JS/TS/TSX are one family. */
     ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_JAVASCRIPT, "lib/util.ts",
                                                           "suffix_match"));
     ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_TYPESCRIPT, "ui/Panel.tsx",
                                                           "suffix_match"));
     ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, NULL, "suffix_match"));
-    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_COUNT, "store.py",
-                                                          "suffix_match"));
+    ASSERT_FALSE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_COUNT, "store.py", "suffix_match"));
     PASS();
 }
 

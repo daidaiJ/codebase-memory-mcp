@@ -242,8 +242,7 @@ typedef enum {
 enum { CBM_WORK_TINY_IO = 512 };
 
 const char *cbm_work_kind_name(cbm_work_kind_t kind);
-void cbm_work_note(cbm_work_kind_t kind, void *site, uint64_t bytes, uint64_t aux1,
-                   uint64_t aux2);
+void cbm_work_note(cbm_work_kind_t kind, void *site, uint64_t bytes, uint64_t aux1, uint64_t aux2);
 void cbm_work_note_strlen(void *site, const char *s, size_t len);
 
 /* Events (allocations and work notes) this thread has produced so far. A pool
@@ -324,8 +323,8 @@ typedef struct {
     uint64_t acc_untouched_bytes;
     uint64_t acc_dead_blocks; /* written, never read */
     uint64_t acc_dead_bytes;
-    uint64_t acc_uninit_reads; /* read before any write, not calloc */
-    uint64_t acc_idle_bytes;   /* last accessed in an earlier phase than freed */
+    uint64_t acc_uninit_reads;  /* read before any write, not calloc */
+    uint64_t acc_idle_bytes;    /* last accessed in an earlier phase than freed */
     uint64_t acc_opaque_blocks; /* written (fill scan) with no callback: no verdict possible */
 } cbm_memev_site_t;
 

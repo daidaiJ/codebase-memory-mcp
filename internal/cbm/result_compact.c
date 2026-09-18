@@ -449,7 +449,9 @@ static bool cr_scratch_get(cr_ctx_t *c) {
     if (!buf) {
         return false;
     }
-    memset(buf, 0, slot_bytes); /* MEASURE needs an empty table; the sequence is written before it is read */
+    memset(
+        buf, 0,
+        slot_bytes); /* MEASURE needs an empty table; the sequence is written before it is read */
     c->slots = (cr_slot_t *)buf;
     c->seq = c->refs ? (uint32_t *)((char *)buf + slot_bytes) : NULL;
     return true;

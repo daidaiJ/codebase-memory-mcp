@@ -140,8 +140,8 @@ __attribute__((constructor(101))) static void libc_resolve(void) {
  * constructor resolves its own target once. */
 #define RESOLVED(ptr, name) ((ptr) ? (ptr) : ((ptr) = dlsym(RTLD_NEXT, name)))
 
-__attribute__((no_builtin("memcpy", "memmove", "memset")))
-static void *slow_move(void *d, const void *s, size_t n) {
+__attribute__((no_builtin("memcpy", "memmove",
+                          "memset"))) static void *slow_move(void *d, const void *s, size_t n) {
     unsigned char *dd = (unsigned char *)d;
     const unsigned char *ss = (const unsigned char *)s;
     if (dd < ss) {
@@ -156,8 +156,7 @@ static void *slow_move(void *d, const void *s, size_t n) {
     return d;
 }
 
-__attribute__((no_builtin("memset")))
-static void *slow_set(void *d, int c, size_t n) {
+__attribute__((no_builtin("memset"))) static void *slow_set(void *d, int c, size_t n) {
     unsigned char *dd = (unsigned char *)d;
     for (size_t i = 0; i < n; i++) {
         dd[i] = (unsigned char)c;
@@ -165,8 +164,7 @@ static void *slow_set(void *d, int c, size_t n) {
     return d;
 }
 
-__attribute__((no_builtin("strlen")))
-static size_t slow_strlen(const char *s) {
+__attribute__((no_builtin("strlen"))) static size_t slow_strlen(const char *s) {
     size_t i = 0;
     while (s[i]) {
         i++;
@@ -174,8 +172,10 @@ static size_t slow_strlen(const char *s) {
     return i;
 }
 
-__attribute__((no_builtin("memcmp", "strcmp", "strncmp")))
-static int slow_ncmp(const char *a, const char *b, size_t n, bool stop_at_nul) {
+__attribute__((no_builtin("memcmp", "strcmp", "strncmp"))) static int slow_ncmp(const char *a,
+                                                                                const char *b,
+                                                                                size_t n,
+                                                                                bool stop_at_nul) {
     for (size_t i = 0; i < n; i++) {
         unsigned char x = (unsigned char)a[i];
         unsigned char y = (unsigned char)b[i];
@@ -209,14 +209,14 @@ void *(memset)(void *d, int c, size_t n) {
     return r_memset ? r_memset(d, c, n) : slow_set(d, c, n);
 }
 
-int (memcmp)(const void *a, const void *b, size_t n) {
+int(memcmp)(const void *a, const void *b, size_t n) {
     note_bytes(CBM_WORK_MEMCMP, SITE(), n);
     ACC_LOAD(a, n);
     ACC_LOAD(b, n);
     return r_memcmp ? r_memcmp(a, b, n) : slow_ncmp((const char *)a, (const char *)b, n, false);
 }
 
-size_t (strlen)(const char *s) {
+size_t(strlen)(const char *s) {
     size_t n = r_strlen ? r_strlen(s) : slow_strlen(s);
     if (cbm_memev_enabled()) {
         cbm_work_note_strlen(SITE(), s, n);
@@ -225,14 +225,14 @@ size_t (strlen)(const char *s) {
     return n;
 }
 
-int (strcmp)(const char *a, const char *b) {
+int(strcmp)(const char *a, const char *b) {
     note_bytes(CBM_WORK_STRCMP, SITE(), 0);
     ACC_LOAD(a, 1);
     ACC_LOAD(b, 1);
     return r_strcmp ? r_strcmp(a, b) : slow_ncmp(a, b, (size_t)-1, true);
 }
 
-int (strncmp)(const char *a, const char *b, size_t n) {
+int(strncmp)(const char *a, const char *b, size_t n) {
     note_bytes(CBM_WORK_STRNCMP, SITE(), n);
     ACC_LOAD(a, 1);
     ACC_LOAD(b, 1);

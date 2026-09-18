@@ -66,13 +66,13 @@ struct CBMHashTable {
 #define HT_SITE() __builtin_return_address(0)
 enum { HT_SLOT_BYTES = sizeof(cbm_vt_bucket) + sizeof(uint16_t) };
 #define HT_WROTE(ht) ((ht)->waste_generation++)
-#define HT_LOOKED_UP(ht, key, found)                                                               \
-    do {                                                                                           \
-        if (cbm_memev_enabled()) {                                                                 \
-            /* site = the table's creation site: lookups are charged to the table */               \
-            cbm_work_note_ht(CBM_WORK_HT_GET, (ht)->waste_site, (ht), (key),                        \
-                             (ht)->waste_generation, (found));                                     \
-        }                                                                                          \
+#define HT_LOOKED_UP(ht, key, found)                                                 \
+    do {                                                                             \
+        if (cbm_memev_enabled()) {                                                   \
+            /* site = the table's creation site: lookups are charged to the table */ \
+            cbm_work_note_ht(CBM_WORK_HT_GET, (ht)->waste_site, (ht), (key),         \
+                             (ht)->waste_generation, (found));                       \
+        }                                                                            \
     } while (0)
 #else
 #define HT_SITE() NULL

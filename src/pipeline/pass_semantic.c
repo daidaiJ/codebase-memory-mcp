@@ -446,7 +446,8 @@ int cbm_pipeline_implements_go(cbm_pipeline_ctx_t *ctx) {
         }
         for (int t = 0; t < type_count; t++) {
             if (types[t]->qualified_name) {
-                cbm_ht_set(ix.type_by_qn, types[t]->qualified_name, (void *)(intptr_t)(t + SKIP_ONE));
+                cbm_ht_set(ix.type_by_qn, types[t]->qualified_name,
+                           (void *)(intptr_t)(t + SKIP_ONE));
             }
             const cbm_gbuf_edge_t **tdm = NULL;
             int tdm_count = 0;
@@ -518,8 +519,8 @@ int cbm_pipeline_implements_go(cbm_pipeline_ctx_t *ctx) {
             continue;
         }
         for (int k = 0; k < shortest->count; k++) {
-            edge_count +=
-                check_go_class_implements(ctx, types[shortest->items[k]], iface, imethods, im_count);
+            edge_count += check_go_class_implements(ctx, types[shortest->items[k]], iface, imethods,
+                                                    im_count);
         }
     }
     if (ix.by_name) {

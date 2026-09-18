@@ -74,8 +74,8 @@ static void add_str_array_or_null(yyjson_mut_doc *doc, yyjson_mut_val *obj, cons
 /* Serialize one file's surface: its slice of all_defs plus the registry-only
  * symbols from its raw extraction defs. Returns a malloc'd JSON string and its
  * length. */
-static char *surface_file_to_json(const CBMFileResult *result, const CBMLSPDef *defs,
-                                  int def_count, size_t *out_len) {
+static char *surface_file_to_json(const CBMFileResult *result, const CBMLSPDef *defs, int def_count,
+                                  size_t *out_len) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     if (!doc) {
         return NULL;
@@ -161,8 +161,8 @@ static void surface_row_one(int i, void *arg) {
     int start = job->def_starts ? job->def_starts[i] : 0;
     int end = job->def_starts ? job->def_starts[i + 1] : 0;
     size_t json_len = 0;
-    char *json = surface_file_to_json(fr, job->all_defs ? job->all_defs + start : NULL,
-                                      end - start, &json_len);
+    char *json = surface_file_to_json(fr, job->all_defs ? job->all_defs + start : NULL, end - start,
+                                      &json_len);
     cbm_pipeline_result_release(fr, loaded);
     if (!json) {
         atomic_store_explicit(&job->failed, true, memory_order_relaxed);

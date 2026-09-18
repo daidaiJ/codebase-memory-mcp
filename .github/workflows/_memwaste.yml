@@ -40,6 +40,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev python3 clang llvm
       - name: Event lane on this repository
         run: |
+          # `cmd | tee` reports TEE's status: without this a failing lane
+          # (a missing exec bit, a build error) passes the step and only
+          # surfaces as the ratchet not finding its JSON.
+          set -o pipefail
           mkdir -p "$RUNNER_TEMP/memwaste-event"
           scripts/memwaste.sh "$GITHUB_WORKSPACE" --top 40 --out "$RUNNER_TEMP/memwaste-event" \
             | tee "$RUNNER_TEMP/memwaste-event/report.txt"
@@ -67,6 +71,10 @@ jobs:
         # Report-only: the script exits 1 when it flags a super-linear function.
         continue-on-error: true
         run: |
+          # `cmd | tee` reports TEE's status: without this a failing lane
+          # (a missing exec bit, a build error) passes the step and only
+          # surfaces as the ratchet not finding its JSON.
+          set -o pipefail
           mkdir -p "$RUNNER_TEMP/memwaste-scaling"
           python3 scripts/memwaste-scaling.py --corpus src --replicas 2 \
             --out "$RUNNER_TEMP/memwaste-scaling" | tee "$RUNNER_TEMP/memwaste-scaling/report.txt"
@@ -88,6 +96,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev python3 clang llvm
       - name: Access lane on this repository
         run: |
+          # `cmd | tee` reports TEE's status: without this a failing lane
+          # (a missing exec bit, a build error) passes the step and only
+          # surfaces as the ratchet not finding its JSON.
+          set -o pipefail
           mkdir -p "$RUNNER_TEMP/memwaste-access"
           scripts/memwaste.sh "$GITHUB_WORKSPACE" --lane access --top 40 --sort untouched \
             --out "$RUNNER_TEMP/memwaste-access" | tee "$RUNNER_TEMP/memwaste-access/report.txt"
@@ -109,6 +121,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Event lane on this repository
         run: |
+          # `cmd | tee` reports TEE's status: without this a failing lane
+          # (a missing exec bit, a build error) passes the step and only
+          # surfaces as the ratchet not finding its JSON.
+          set -o pipefail
           mkdir -p "$RUNNER_TEMP/memwaste-event"
           scripts/memwaste.sh "$GITHUB_WORKSPACE" --top 40 --out "$RUNNER_TEMP/memwaste-event" \
             | tee "$RUNNER_TEMP/memwaste-event/report.txt"
@@ -145,6 +161,10 @@ jobs:
       - name: Event lane on this repository
         shell: msys2 {0}
         run: |
+          # `cmd | tee` reports TEE's status: without this a failing lane
+          # (a missing exec bit, a build error) passes the step and only
+          # surfaces as the ratchet not finding its JSON.
+          set -o pipefail
           out="$(cygpath -u "$RUNNER_TEMP")/memwaste-event"
           mkdir -p "$out"
           CC=clang CXX=clang++ scripts/memwaste.sh "$(cygpath -u "$GITHUB_WORKSPACE")" --top 40 --out "$out" \

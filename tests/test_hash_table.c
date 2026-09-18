@@ -55,7 +55,7 @@ TEST(ht_set_overwrite_adopts_the_new_key_pointer) {
     ASSERT_EQ(cbm_ht_get_key(ht, "shared"), first);
     ASSERT_EQ(cbm_ht_set(ht, second, &v2), &v1);
     ASSERT_EQ(cbm_ht_get_key(ht, "shared"), second); /* the old buffer is no longer referenced */
-    memcpy(first, "gone!!", 7);                       /* the caller reuses the old buffer */
+    memcpy(first, "gone!!", 7);                      /* the caller reuses the old buffer */
     ASSERT_EQ(*(int *)cbm_ht_get(ht, "shared"), 2);
     ASSERT_EQ(cbm_ht_count(ht), 1);
     cbm_ht_free(ht);

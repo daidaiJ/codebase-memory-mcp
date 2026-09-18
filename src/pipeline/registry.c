@@ -237,8 +237,8 @@ static const char *best_by_import_distance(const char **candidates, const uint8_
     const char *best = NULL;
     int best_score = CBM_NOT_FOUND;
     for (int i = 0; i < count; i++) {
-        int score = candidate_score(candidates[i], module_qn,
-                                    is_test_flags ? (int)is_test_flags[i] : -1);
+        int score =
+            candidate_score(candidates[i], module_qn, is_test_flags ? (int)is_test_flags[i] : -1);
         if (score > best_score) {
             best_score = score;
             best = candidates[i];
@@ -968,9 +968,8 @@ static cbm_resolution_t resolve_multi_with_imports(const qn_array_t *arr, const 
         }
     }
     /* No import-reachable — use all candidates with penalty */
-    const char *best =
-        best_by_import_distance((const char **)arr->items, qn_test_flags(arr), arr->count,
-                                module_qn);
+    const char *best = best_by_import_distance((const char **)arr->items, qn_test_flags(arr),
+                                               arr->count, module_qn);
     if (best) {
         double conf = candidate_count_penalty(CONF_SUFFIX_MATCH * REG_HALF_PENALTY, arr->count);
         return (cbm_resolution_t){best, "suffix_match", conf, arr->count};
@@ -1156,9 +1155,8 @@ static cbm_resolution_t resolve_name_lookup(const cbm_registry_t *r, const char 
     if (import_vals && import_count > 0) {
         return resolve_multi_with_imports(arr, module_qn, import_vals, import_count);
     }
-    const char *best =
-        best_by_import_distance((const char **)arr->items, qn_test_flags(arr), arr->count,
-                                module_qn);
+    const char *best = best_by_import_distance((const char **)arr->items, qn_test_flags(arr),
+                                               arr->count, module_qn);
     if (best) {
         if (!receiver_chain_admits(callee_name, best)) {
             return empty_result();
@@ -1338,9 +1336,8 @@ cbm_fuzzy_result_t cbm_registry_fuzzy_resolve(const cbm_registry_t *r, const cha
 
     if (fcount == 0) {
         /* No import-reachable — use originals with penalty */
-        const char *best =
-            best_by_import_distance((const char **)arr->items, qn_test_flags(arr), arr->count,
-                                module_qn);
+        const char *best = best_by_import_distance((const char **)arr->items, qn_test_flags(arr),
+                                                   arr->count, module_qn);
         if (!best) {
             return no_match;
         }
@@ -1354,10 +1351,8 @@ cbm_fuzzy_result_t cbm_registry_fuzzy_resolve(const cbm_registry_t *r, const cha
             {fptr[0], "fuzzy", candidate_count_penalty(CONF_FUZZY_SINGLE, arr->count), arr->count},
             true};
     }
-    const char *best =
-        best_by_import_distance(fptr,
-                                fptr == (const char **)arr->items ? qn_test_flags(arr) : NULL,
-                                fcount, module_qn);
+    const char *best = best_by_import_distance(
+        fptr, fptr == (const char **)arr->items ? qn_test_flags(arr) : NULL, fcount, module_qn);
     if (!best) {
         return no_match;
     }

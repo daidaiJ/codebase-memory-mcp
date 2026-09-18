@@ -23,8 +23,8 @@
 #include "mem_core.h" /* same directory: units without -Isrc include this header relatively */
 #if defined(CBM_MEMWASTE) && CBM_MEMWASTE
 #include "mem_events.h"
-#define CBM_DA_WASTE_NOTE(da)                                                              \
-    cbm_memev_da_note((size_t)(da)->cap * sizeof(*(da)->items),                            \
+#define CBM_DA_WASTE_NOTE(da)                                   \
+    cbm_memev_da_note((size_t)(da)->cap * sizeof(*(da)->items), \
                       (size_t)(da)->count * sizeof(*(da)->items), (size_t)(da)->cap)
 #else
 #define CBM_DA_WASTE_NOTE(da) ((void)0)

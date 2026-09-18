@@ -71,7 +71,7 @@ enum {
     MEMEV_SEQ_MASK = (1 << MEMEV_SEQ_BITS) - 1,
     MEMEV_PHASE_CAP = 63, /* stored in 6 bits */
     MEMEV_PHASE_LABEL = 48,
-    MEMEV_LINE = 2048, /* a site line with every field at 20 digits is ~1,150 bytes */
+    MEMEV_LINE = 2048,   /* a site line with every field at 20 digits is ~1,150 bytes */
     MEMEV_PTR_SHIFT = 4, /* allocators align to 16: the low bits carry no entropy */
     MEMEV_REPEAT_SLOTS = 256,
     MEMEV_PATH_BITS = 20,
@@ -126,8 +126,7 @@ static void vm_put(void *p, size_t bytes) {
 typedef atomic_flag memev_lock_t;
 
 static void lock_take(memev_lock_t *l) {
-    while (atomic_flag_test_and_set_explicit(l, memory_order_acquire)) {
-    }
+    while (atomic_flag_test_and_set_explicit(l, memory_order_acquire)) {}
 }
 
 static void lock_drop(memev_lock_t *l) {
@@ -267,10 +266,10 @@ static _Atomic bool g_observer_installed;
 static _Atomic uintptr_t g_image_base;
 
 static const char *const g_work_names[CBM_WORK_KIND_COUNT] = {
-    "memcpy",   "memmove", "memset",  "memcmp",       "strlen",   "strcmp",      "strncmp",
-    "read",     "write",   "pread",   "pwrite",       "open",     "stat",        "fopen",
-    "fread",    "fwrite",  "opendir", "readdir",      "mutex",    "parallel_for", "pool_ops",
-    "ht_get",   "ht_set",  "dead_write", "ct_arena",   "ct_dyn_array", "ct_hash_table",
+    "memcpy", "memmove", "memset",     "memcmp",   "strlen",       "strcmp",        "strncmp",
+    "read",   "write",   "pread",      "pwrite",   "open",         "stat",          "fopen",
+    "fread",  "fwrite",  "opendir",    "readdir",  "mutex",        "parallel_for",  "pool_ops",
+    "ht_get", "ht_set",  "dead_write", "ct_arena", "ct_dyn_array", "ct_hash_table",
 };
 
 const char *cbm_work_kind_name(cbm_work_kind_t kind) {
@@ -369,9 +368,9 @@ static bool key_ready(void) {
     int state = atomic_load_explicit(&g_key_state, memory_order_acquire);
     while (state != 2) {
         int expect = 0;
-        if (state == 0 && atomic_compare_exchange_strong_explicit(&g_key_state, &expect, 1,
-                                                                  memory_order_acq_rel,
-                                                                  memory_order_acquire)) {
+        if (state == 0 &&
+            atomic_compare_exchange_strong_explicit(&g_key_state, &expect, 1, memory_order_acq_rel,
+                                                    memory_order_acquire)) {
 #ifdef _WIN32
             /* A plain TLS slot, released from the loader's thread-detach
              * callback (cbm_memev_thread_end, compat_thread.c). An FLS
@@ -510,9 +509,8 @@ static uint32_t key_index(_Atomic uintptr_t *keys, uint32_t cap, uintptr_t key) 
         }
         if (seen == 0) {
             uintptr_t expect = 0;
-            if (atomic_compare_exchange_strong_explicit(&keys[idx], &expect, key,
-                                                        memory_order_acq_rel,
-                                                        memory_order_acquire) ||
+            if (atomic_compare_exchange_strong_explicit(
+                    &keys[idx], &expect, key, memory_order_acq_rel, memory_order_acquire) ||
                 expect == key) {
                 return idx;
             }
@@ -818,8 +816,8 @@ static void acc_give_id(tl_state_t *st, uint32_t id) {
     lock_drop(&g_acc_lock);
 }
 
-static void acc_track(tl_state_t *st, uintptr_t block, uint64_t usable, uint32_t site,
-                      bool zeroed, bool filled, bool written) {
+static void acc_track(tl_state_t *st, uintptr_t block, uint64_t usable, uint32_t site, bool zeroed,
+                      bool filled, bool written) {
     if (!acc_init()) {
         return;
     }
@@ -1034,8 +1032,8 @@ static void record_alloc(tl_state_t *st, uintptr_t block, size_t requested, size
 
     bool zeroed = (flags & CBM_MEMEV_ZEROED) != 0;
     bool filled = false;
-    if (!zeroed && !(flags & (CBM_MEMEV_FOREIGN | CBM_MEMEV_WRITTEN)) && charged <= MEMEV_FILL_CAP &&
-        fill_enabled()) {
+    if (!zeroed && !(flags & (CBM_MEMEV_FOREIGN | CBM_MEMEV_WRITTEN)) &&
+        charged <= MEMEV_FILL_CAP && fill_enabled()) {
         memset((void *)block, MEMEV_FILL_BYTE, (size_t)charged);
         filled = true;
     }
@@ -1049,9 +1047,9 @@ static void record_alloc(tl_state_t *st, uintptr_t block, size_t requested, size
         e->seq = (st->slot << MEMEV_SEQ_BITS) | st->alloc_seq;
         e->site = (uint16_t)sid;
         e->mem_class = (int8_t)mem_class;
-        e->meta = (uint8_t)((atomic_load_explicit(&g_phase, memory_order_relaxed) &
-                             META_PHASE_MASK) |
-                            (filled ? META_FILLED : 0) | (zeroed ? META_ZEROED : 0));
+        e->meta =
+            (uint8_t)((atomic_load_explicit(&g_phase, memory_order_relaxed) & META_PHASE_MASK) |
+                      (filled ? META_FILLED : 0) | (zeroed ? META_ZEROED : 0));
     }
     lock_drop(&sh->lock);
     if (!e) {
@@ -1070,15 +1068,13 @@ static void record_alloc(tl_state_t *st, uintptr_t block, size_t requested, size
         c->live_blocks++;
 #if defined(CBM_MEMWASTE_ACCESS) && CBM_MEMWASTE_ACCESS
         if (!(flags & (CBM_MEMEV_FOREIGN | CBM_MEMEV_LIBRARY))) {
-            acc_track(st, block, charged, sid, zeroed, filled,
-                      (flags & CBM_MEMEV_WRITTEN) != 0);
+            acc_track(st, block, charged, sid, zeroed, filled, (flags & CBM_MEMEV_WRITTEN) != 0);
         }
 #endif
     }
 }
 
-void cbm_memev_alloc_ex(void *block, size_t requested, size_t usable, void *site,
-                        unsigned flags) {
+void cbm_memev_alloc_ex(void *block, size_t requested, size_t usable, void *site, unsigned flags) {
     if (!cbm_memev_enabled()) {
         return;
     }
@@ -1142,8 +1138,8 @@ void cbm_memev_free(void *block) {
         int scan_written = -1;
         if ((e.meta & (META_FILLED | META_ZEROED)) && e.usable <= MEMEV_FILL_CAP) {
             bool zeroed = (e.meta & META_ZEROED) != 0;
-            scan_t sc = scan_block((const uint8_t *)block, (size_t)e.usable,
-                                   zeroed ? 0 : MEMEV_FILL_BYTE);
+            scan_t sc =
+                scan_block((const uint8_t *)block, (size_t)e.usable, zeroed ? 0 : MEMEV_FILL_BYTE);
             scan_written = sc.high_water > 0 ? 1 : 0;
             c->scanned_blocks++;
             if (zeroed) {
@@ -1173,8 +1169,7 @@ void cbm_memev_free_foreign(void *block) {
     atomic_fetch_add_explicit(&g_foreign_frees, 1, memory_order_relaxed);
 }
 
-void cbm_memev_realloc(void *old_block, void *grown, size_t requested, size_t usable,
-                       void *site) {
+void cbm_memev_realloc(void *old_block, void *grown, size_t requested, size_t usable, void *site) {
     if (!cbm_memev_enabled()) {
         return;
     }
@@ -1333,8 +1328,7 @@ uint64_t cbm_memev_thread_ops(void) {
     return st ? st->ops : 0;
 }
 
-void cbm_work_note(cbm_work_kind_t kind, void *site, uint64_t bytes, uint64_t aux1,
-                   uint64_t aux2) {
+void cbm_work_note(cbm_work_kind_t kind, void *site, uint64_t bytes, uint64_t aux1, uint64_t aux2) {
     if ((int)kind < 0 || kind >= CBM_WORK_KIND_COUNT || !cbm_memev_enabled()) {
         return;
     }
@@ -1382,11 +1376,9 @@ void cbm_work_note_strlen(void *site, const char *s, size_t len) {
         return;
     }
     st->busy = true;
-    strlen_pair_t *slot =
-        &st->strlen_cache[mix((uint64_t)(uintptr_t)s) & (MEMEV_REPEAT_SLOTS - 1)];
+    strlen_pair_t *slot = &st->strlen_cache[mix((uint64_t)(uintptr_t)s) & (MEMEV_REPEAT_SLOTS - 1)];
     uint64_t content = bytes_hash(s, len);
-    uint64_t repeat =
-        (slot->ptr == s && slot->len == len && slot->content_hash == content) ? 1 : 0;
+    uint64_t repeat = (slot->ptr == s && slot->len == len && slot->content_hash == content) ? 1 : 0;
     slot->ptr = s;
     slot->len = len;
     slot->content_hash = content;
@@ -1424,9 +1416,8 @@ void cbm_work_note_path(cbm_work_kind_t kind, void *site, const char *path, bool
         }
         if (seen == 0) {
             uint64_t expect = 0;
-            if (atomic_compare_exchange_strong_explicit(&g_path_hashes[idx], &expect, h,
-                                                        memory_order_relaxed,
-                                                        memory_order_relaxed)) {
+            if (atomic_compare_exchange_strong_explicit(
+                    &g_path_hashes[idx], &expect, h, memory_order_relaxed, memory_order_relaxed)) {
                 break;
             }
             if (expect == h) {
@@ -1456,10 +1447,10 @@ void cbm_work_note_ht(cbm_work_kind_t kind, void *site, const void *table, const
         ht_pair_t *slot =
             &st->ht_cache[mix((uint64_t)(uintptr_t)table ^ (key_hash * 0x9e3779b97f4a7c15ULL)) &
                           (MEMEV_REPEAT_SLOTS - 1)];
-        repeat = (slot->table == table && slot->key_hash == key_hash &&
-                  slot->generation == generation)
-                     ? 1
-                     : 0;
+        repeat =
+            (slot->table == table && slot->key_hash == key_hash && slot->generation == generation)
+                ? 1
+                : 0;
         slot->table = table;
         slot->key_hash = key_hash;
         slot->generation = generation;
@@ -1518,8 +1509,7 @@ static void flush_state(tl_state_t *st) {
     st->work_dirty_count = 0;
     lock_drop(&g_merge_lock);
     atomic_fetch_add_explicit(&g_untracked_frees, st->untracked_frees, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_pointer_table_full, st->pointer_table_full,
-                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_pointer_table_full, st->pointer_table_full, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_site_table_full, st->site_table_full, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_work_table_full, st->work_table_full, memory_order_relaxed);
     st->untracked_frees = 0;
@@ -1618,8 +1608,8 @@ static void snapshot_phase(uint32_t phase_now) {
                 continue;
             }
             const uint8_t *p = (const uint8_t *)e->block;
-            scan_t sc = scan_block(p, (size_t)e->usable,
-                                   (e->meta & META_ZEROED) ? 0 : MEMEV_FILL_BYTE);
+            scan_t sc =
+                scan_block(p, (size_t)e->usable, (e->meta & META_ZEROED) ? 0 : MEMEV_FILL_BYTE);
             if (sc.high_water == 0) {
                 continue; /* nothing written: that is never-written waste, not a duplicate */
             }
@@ -1881,7 +1871,8 @@ static bool dump_locked(const char *path, const char *why) {
         line, sizeof(line),
         "{\"memwaste\":2,\"why\":\"%s\",\"pid\":%d,\"image_base\":\"0x%llx\",\"phase\":%u,"
         "\"phase_label\":\"%s\",\"rss_bytes\":%llu,\"allocs\":%llu,\"frees\":%llu,"
-        "\"untracked_frees\":%llu,\"foreign_frees\":%llu,\"reallocs\":%llu,\"requested_bytes\":%llu,\"usable_bytes\":%llu,"
+        "\"untracked_frees\":%llu,\"foreign_frees\":%llu,\"reallocs\":%llu,\"requested_bytes\":%"
+        "llu,\"usable_bytes\":%llu,"
         "\"realloc_copy_bytes\":%llu,\"live_bytes\":%llu,\"live_blocks\":%llu,\"raw_bytes\":%llu,"
         "\"sites\":%llu,\"site_table_full\":%llu,\"pointer_table_full\":%llu,"
         "\"work_table_full\":%llu,\"layer_vm_bytes\":%llu,\"layer_threads\":%lld,"
@@ -1891,13 +1882,12 @@ static bool dump_locked(const char *path, const char *why) {
         atomic_load_explicit(&g_phase, memory_order_relaxed), label,
         (unsigned long long)cbm_mem_rss(), (unsigned long long)t.allocs,
         (unsigned long long)t.frees, (unsigned long long)t.untracked_frees,
-        (unsigned long long)t.foreign_frees,
-        (unsigned long long)t.reallocs, (unsigned long long)t.requested_bytes,
-        (unsigned long long)t.usable_bytes, (unsigned long long)t.realloc_copy_bytes,
-        (unsigned long long)t.live_bytes, (unsigned long long)t.live_blocks,
-        (unsigned long long)t.raw_bytes, (unsigned long long)t.sites,
-        (unsigned long long)t.site_table_full, (unsigned long long)t.pointer_table_full,
-        (unsigned long long)t.work_table_full,
+        (unsigned long long)t.foreign_frees, (unsigned long long)t.reallocs,
+        (unsigned long long)t.requested_bytes, (unsigned long long)t.usable_bytes,
+        (unsigned long long)t.realloc_copy_bytes, (unsigned long long)t.live_bytes,
+        (unsigned long long)t.live_blocks, (unsigned long long)t.raw_bytes,
+        (unsigned long long)t.sites, (unsigned long long)t.site_table_full,
+        (unsigned long long)t.pointer_table_full, (unsigned long long)t.work_table_full,
         (unsigned long long)atomic_load_explicit(&g_layer_vm_bytes, memory_order_relaxed),
         (long long)atomic_load_explicit(&g_layer_threads, memory_order_relaxed),
         fill_enabled() ? 1 : 0,
@@ -1933,13 +1923,12 @@ static bool dump_locked(const char *path, const char *why) {
             (unsigned long long)r.live_bytes, (unsigned long long)r.live_blocks,
             (unsigned long long)r.short_lived, (unsigned long long)r.raw_bytes,
             (unsigned long long)r.scanned_blocks, (unsigned long long)r.never_written_bytes,
-            (unsigned long long)r.over_requested_bytes,
-            (unsigned long long)r.zero_untouched_bytes, (unsigned long long)r.retained_bytes,
-            (unsigned long long)r.dup_bytes, (unsigned long long)r.dup_blocks,
-            (unsigned long long)r.acc_untouched_blocks, (unsigned long long)r.acc_untouched_bytes,
-            (unsigned long long)r.acc_dead_blocks, (unsigned long long)r.acc_dead_bytes,
-            (unsigned long long)r.acc_uninit_reads, (unsigned long long)r.acc_idle_bytes,
-            (unsigned long long)r.acc_opaque_blocks);
+            (unsigned long long)r.over_requested_bytes, (unsigned long long)r.zero_untouched_bytes,
+            (unsigned long long)r.retained_bytes, (unsigned long long)r.dup_bytes,
+            (unsigned long long)r.dup_blocks, (unsigned long long)r.acc_untouched_blocks,
+            (unsigned long long)r.acc_untouched_bytes, (unsigned long long)r.acc_dead_blocks,
+            (unsigned long long)r.acc_dead_bytes, (unsigned long long)r.acc_uninit_reads,
+            (unsigned long long)r.acc_idle_bytes, (unsigned long long)r.acc_opaque_blocks);
         ok = len > 0 && (size_t)len < sizeof(line) && write_all(fd, line, (size_t)len);
     }
     for (uint32_t i = 0; ok && i < MEMEV_WORK_CAP; i++) {
@@ -2050,8 +2039,7 @@ void cbm_memev_alloc(void *block, size_t requested, size_t usable, void *site) {
     (void)usable;
     (void)site;
 }
-void cbm_memev_alloc_ex(void *block, size_t requested, size_t usable, void *site,
-                        unsigned flags) {
+void cbm_memev_alloc_ex(void *block, size_t requested, size_t usable, void *site, unsigned flags) {
     (void)block;
     (void)requested;
     (void)usable;
@@ -2064,8 +2052,7 @@ void cbm_memev_free(void *block) {
 void cbm_memev_free_foreign(void *block) {
     (void)block;
 }
-void cbm_memev_realloc(void *old_block, void *grown, size_t requested, size_t usable,
-                       void *site) {
+void cbm_memev_realloc(void *old_block, void *grown, size_t requested, size_t usable, void *site) {
     (void)old_block;
     (void)grown;
     (void)requested;
@@ -2088,8 +2075,7 @@ void cbm_memev_set_observer_installed(bool installed) {
 bool cbm_memev_observer_installed(void) {
     return false;
 }
-void cbm_memev_flush_thread(void) {
-}
+void cbm_memev_flush_thread(void) {}
 void cbm_memev_phase(const char *label) {
     (void)label;
 }
@@ -2112,8 +2098,7 @@ void cbm_memev_library_leave(void) {}
 void *cbm_memev_library_site(void) {
     return NULL;
 }
-void cbm_work_note(cbm_work_kind_t kind, void *site, uint64_t bytes, uint64_t aux1,
-                   uint64_t aux2) {
+void cbm_work_note(cbm_work_kind_t kind, void *site, uint64_t bytes, uint64_t aux1, uint64_t aux2) {
     (void)kind;
     (void)site;
     (void)bytes;
@@ -2165,8 +2150,7 @@ bool cbm_memev_dump(const char *path, const char *why) {
     (void)why;
     return false;
 }
-void cbm_memev_reset_for_tests(void) {
-}
+void cbm_memev_reset_for_tests(void) {}
 void cbm_memev_scan_for_tests(bool fill, bool dupes) {
     (void)fill;
     (void)dupes;

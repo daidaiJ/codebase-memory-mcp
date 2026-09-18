@@ -3154,6 +3154,25 @@ static const char *const cbm_stage_sidecar_tails[] = {"", "-wal", "-shm", "-jour
 
 /* If `name` is "<base>.stage.<6 alphanumerics><known tail>", return the
  * length of the stage name proper (without the tail); 0 otherwise. */
+static size_t stage_entry_stage_length(const char *name, const char *base, size_t base_len);
+
+/* The same test with the base taken from the name itself, so a sweep reclaims
+ * stages belonging to ANY project in this cache directory.
+ *
+ * Why it must not be per-project: a run killed outright (OOM killer, SIGKILL)
+ * cleans nothing up, and until 2026-09-18 its staging database was only removed
+ * when THAT project was indexed again — a kernel index killed once left 15 GB
+ * parked until someone re-indexed the kernel, and forever if nobody did. The
+ * per-stage lock probe still decides safety, so a live writer's stage is kept
+ * whichever project it belongs to. */
+static size_t stage_entry_stage_length_any_base(const char *name) {
+    const char *marker = strstr(name, cbm_stage_marker);
+    if (!marker) {
+        return 0;
+    }
+    return stage_entry_stage_length(name, name, (size_t)(marker - name));
+}
+
 static size_t stage_entry_stage_length(const char *name, const char *base, size_t base_len) {
     if (strncmp(name, base, base_len) != 0) {
         return 0;
@@ -3309,7 +3328,10 @@ static void sweep_orphan_stages(const char *final_path) {
     stage_name_list_t list = {0};
     cbm_dirent_t *entry;
     while ((entry = cbm_readdir(dir)) != NULL) {
-        size_t stage_len = stage_entry_stage_length(entry->name, base, base_len);
+        /* Any project's orphan, not just this one's: see
+         * stage_entry_stage_length_any_base. `base` still anchors the log line
+         * and the path rebuild below. */
+        size_t stage_len = stage_entry_stage_length_any_base(entry->name);
         if (stage_len) {
             stage_name_list_add(&list, entry->name, stage_len);
         }

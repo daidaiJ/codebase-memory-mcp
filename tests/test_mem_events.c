@@ -309,9 +309,11 @@ TEST(memev_dump_writes_header_sites_and_work) {
                      strstr(line, "\"allocs\":2");
         }
         site_a = site_a || strstr(line, "\"site\":\"0xa000\",\"allocs\":1");
-        site_b = site_b || (strstr(line, "\"site\":\"0xb000\"") && strstr(line, "\"usable_bytes\":1024"));
-        work = work || (strstr(line, "\"work\":\"memcpy\"") && strstr(line, "\"site\":\"0xc000\"") &&
-                        strstr(line, "\"bytes\":4096") && strstr(line, "\"peak\":4096"));
+        site_b = site_b ||
+                 (strstr(line, "\"site\":\"0xb000\"") && strstr(line, "\"usable_bytes\":1024"));
+        work =
+            work || (strstr(line, "\"work\":\"memcpy\"") && strstr(line, "\"site\":\"0xc000\"") &&
+                     strstr(line, "\"bytes\":4096") && strstr(line, "\"peak\":4096"));
     }
     fclose(f);
     (void)remove(path);
@@ -350,8 +352,8 @@ TEST(memev_fill_scan_measures_never_written_and_over_requested) {
     cbm_memev_free(big);
 
     cbm_memev_alloc(holed, 80, sizeof(holed), SITE_B);
-    memset(holed, 2, 16);          /* [0, 16) written */
-    memset(holed + 64, 3, 16);     /* [64, 80) written: [16, 64) is a 48-byte hole */
+    memset(holed, 2, 16);      /* [0, 16) written */
+    memset(holed + 64, 3, 16); /* [64, 80) written: [16, 64) is a 48-byte hole */
     cbm_memev_free(holed);
 
     cbm_memev_site_t a;

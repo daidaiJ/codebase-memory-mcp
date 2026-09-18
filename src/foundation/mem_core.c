@@ -231,13 +231,12 @@ static bool core_reports_frees(void) {
             cbm_memev_hint(__builtin_return_address(0), (int)(cls)); \
         }                                                            \
     } while (0)
-#define MEMEV_ALLOCATED(block, bytes, flags)                                      \
-    do {                                                                          \
-        if (cbm_memev_hint_pending()) {                                           \
-            cbm_memev_alloc_ex((block), (bytes),                                  \
-                               (block) ? charge_size((block), (bytes)) : 0, NULL, \
-                               (flags));                                          \
-        }                                                                         \
+#define MEMEV_ALLOCATED(block, bytes, flags)                                                  \
+    do {                                                                                      \
+        if (cbm_memev_hint_pending()) {                                                       \
+            cbm_memev_alloc_ex((block), (bytes), (block) ? charge_size((block), (bytes)) : 0, \
+                               NULL, (flags));                                                \
+        }                                                                                     \
     } while (0)
 #define MEMEV_REALLOCATED(old_block, grown, bytes)                                \
     do {                                                                          \

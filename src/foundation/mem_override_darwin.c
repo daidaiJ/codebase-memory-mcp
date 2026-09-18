@@ -120,8 +120,7 @@ static void *obs_calloc(malloc_zone_t *z, size_t count, size_t n) {
     if (p && cbm_memev_enabled()) {
         unsigned flags;
         void *site = caller_site(__builtin_frame_address(0), &flags);
-        cbm_memev_alloc_ex(p, count * n, g_orig->size(g_orig, p), site,
-                           flags | CBM_MEMEV_ZEROED);
+        cbm_memev_alloc_ex(p, count * n, g_orig->size(g_orig, p), site, flags | CBM_MEMEV_ZEROED);
     }
     return p;
 }

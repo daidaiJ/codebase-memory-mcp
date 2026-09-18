@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include "foundation/platform.h"  /* cbm_default_worker_count */
+#include "foundation/platform.h" /* cbm_default_worker_count */
 #include "pipeline/worker_pool.h"
 #include "foundation/compat_regex.h"
 
@@ -256,8 +256,8 @@ typedef struct {
     _Atomic bool failed;
 } key_match_job_t;
 
-static double key_pair_confidence(const char *config_norm, size_t config_len,
-                                  const char *code_norm, size_t code_len) {
+static double key_pair_confidence(const char *config_norm, size_t config_len, const char *code_norm,
+                                  size_t code_len) {
     if (config_len > code_len) {
         return 0.0;
     }
@@ -280,15 +280,15 @@ static void key_match_worker(int worker_id, void *arg) {
         }
         key_match_list_t *list = &job->lists[ci];
         for (int co = 0; co < job->code_count; co++) {
-            double confidence =
-                key_pair_confidence(job->config[ci].normalized, job->config_len[ci],
-                                    job->code[co].normalized, job->code_len[co]);
+            double confidence = key_pair_confidence(job->config[ci].normalized, job->config_len[ci],
+                                                    job->code[co].normalized, job->code_len[co]);
             if (confidence <= 0.0) {
                 continue;
             }
             if (list->count == list->cap) {
                 int cap = list->cap ? list->cap * PAIR_LEN : CBM_SZ_16;
-                key_match_t *grown = realloc(list->items, (size_t)cap * sizeof(*grown));
+                key_match_t *grown =
+                    cbm_realloc(CBM_MEM_CLASS_OTHER, list->items, (size_t)cap * sizeof(*grown));
                 if (!grown) {
                     atomic_store_explicit(&job->failed, true, memory_order_relaxed);
                     return;
@@ -323,9 +323,11 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
 
     int edge_count = 0;
 
-    size_t *config_len = malloc((size_t)config_count * sizeof(size_t));
-    size_t *code_len = malloc((size_t)(code_count > 0 ? code_count : 1) * sizeof(size_t));
-    key_match_list_t *lists = calloc((size_t)config_count, sizeof(key_match_list_t));
+    size_t *config_len = cbm_alloc(CBM_MEM_CLASS_OTHER, (size_t)config_count * sizeof(size_t));
+    size_t *code_len =
+        cbm_alloc(CBM_MEM_CLASS_OTHER, (size_t)(code_count > 0 ? code_count : 1) * sizeof(size_t));
+    key_match_list_t *lists =
+        cbm_calloc(CBM_MEM_CLASS_OTHER, (size_t)config_count * sizeof(key_match_list_t));
     bool parallel_ok = config_len && code_len && lists;
     if (parallel_ok) {
         for (int ci = 0; ci < config_count; ci++) {
@@ -346,8 +348,9 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
         atomic_init(&job.next, 0);
         atomic_init(&job.failed, false);
         int workers = cbm_default_worker_count(false);
-        cbm_parallel_for(workers, key_match_worker, &job,
-                         (cbm_parallel_for_opts_t){.max_workers = workers, .force_pthreads = false});
+        cbm_parallel_for(
+            workers, key_match_worker, &job,
+            (cbm_parallel_for_opts_t){.max_workers = workers, .force_pthreads = false});
         parallel_ok = !atomic_load_explicit(&job.failed, memory_order_relaxed);
     }
     if (parallel_ok) {
@@ -366,11 +369,11 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
         }
     }
     for (int ci = 0; lists && ci < config_count; ci++) {
-        free(lists[ci].items);
+        cbm_free(CBM_MEM_CLASS_OTHER, lists[ci].items);
     }
-    free(lists);
-    free(config_len);
-    free(code_len);
+    cbm_free(CBM_MEM_CLASS_OTHER, lists);
+    cbm_free(CBM_MEM_CLASS_OTHER, config_len);
+    cbm_free(CBM_MEM_CLASS_OTHER, code_len);
     if (parallel_ok) {
         return edge_count;
     }
@@ -529,12 +532,12 @@ static int prepare_dep_imports(cbm_gbuf_t *gb, const cbm_gbuf_edge_t *const *imp
             bytes += (qlen < QN_CAP ? qlen : QN_CAP - SKIP_ONE) + SKIP_ONE;
         }
     }
-    dep_import_t *items = (dep_import_t *)malloc((size_t)(import_count > 0 ? import_count : 1) *
-                                                 sizeof(dep_import_t));
-    char *block = (char *)malloc(bytes > 0 ? bytes : 1);
+    dep_import_t *items = cbm_alloc(
+        CBM_MEM_CLASS_OTHER, (size_t)(import_count > 0 ? import_count : 1) * sizeof(dep_import_t));
+    char *block = cbm_alloc(CBM_MEM_CLASS_OTHER, bytes > 0 ? bytes : 1);
     if (!items || !block) {
-        free(items);
-        free(block);
+        cbm_free(CBM_MEM_CLASS_OTHER, items);
+        cbm_free(CBM_MEM_CLASS_OTHER, block);
         return 0;
     }
     int n = 0;
@@ -591,8 +594,7 @@ static int strategy_dep_imports(cbm_gbuf_t *gb) {
     int edge_count = 0;
     dep_import_t *prepared = NULL;
     char *prepared_block = NULL;
-    int prepared_count =
-        prepare_dep_imports(gb, imports, import_count, &prepared, &prepared_block);
+    int prepared_count = prepare_dep_imports(gb, imports, import_count, &prepared, &prepared_block);
 
     for (int di = 0; di < dep_count && prepared; di++) {
         char dep_lower[CBM_SZ_256];
@@ -615,8 +617,8 @@ static int strategy_dep_imports(cbm_gbuf_t *gb) {
     }
 
     /* gbuf data is borrowed; only the prepared copies are owned */
-    free(prepared);
-    free(prepared_block);
+    cbm_free(CBM_MEM_CLASS_OTHER, prepared);
+    cbm_free(CBM_MEM_CLASS_OTHER, prepared_block);
     return edge_count;
 }
 

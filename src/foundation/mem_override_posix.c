@@ -47,12 +47,12 @@
  * the `memwaste` flavour. Frees are reported BEFORE the block goes back. */
 #if defined(CBM_MEMWASTE) && CBM_MEMWASTE
 #include "foundation/mem_events.h"
-#define OBS_ALLOC_F(block, requested, flags)                                        \
-    do {                                                                            \
-        if ((block) && cbm_memev_enabled()) {                                       \
-            cbm_memev_alloc_ex((block), (requested), mi_usable_size(block),         \
-                               __builtin_return_address(0), (unsigned)(flags));     \
-        }                                                                           \
+#define OBS_ALLOC_F(block, requested, flags)                                    \
+    do {                                                                        \
+        if ((block) && cbm_memev_enabled()) {                                   \
+            cbm_memev_alloc_ex((block), (requested), mi_usable_size(block),     \
+                               __builtin_return_address(0), (unsigned)(flags)); \
+        }                                                                       \
     } while (0)
 #define OBS_ALLOC(block, requested) OBS_ALLOC_F((block), (requested), 0)
 #define OBS_REALLOC(old_block, grown, requested)                                        \
