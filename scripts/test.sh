@@ -318,6 +318,15 @@ make -j"$NPROC" -f Makefile.cbm cbm TEST_SEAMS=1 ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}
 WATCHDOG_BINARY="$ROOT/$BUILD_DIR/codebase-memory-mcp"
 CBM_TEST_BINARY="$WATCHDOG_BINARY" bash "$ROOT/tests/test_parent_watchdog.sh"
 
+# Step 5a: that watchdog is also the SMALLEST-stack thread in the image, which
+# makes it the first casualty when static TLS grows — glibc takes the TLS block
+# out of each thread's own stack allocation. Checked here, against the binary
+# Step 5 just built, because the failure it prevents surfaces nowhere near its
+# cause (PR #2233: a thread-local cache in an extraction file stopped the index
+# worker from starting, on x86-64 only).
+echo "=== Step 5a: static-TLS budget against the smallest thread stack ==="
+bash "$ROOT/tests/test_thread_stack_tls_contract.sh" "$WATCHDOG_BINARY"
+
 # Step 5b: worker-mode parent-death watchdog (#845). A supervised index worker
 # (`cli --index-worker …`) whose supervisor dies must self-exit instead of
 # indexing on as an orphan. Reuses the prod binary built in Step 5.

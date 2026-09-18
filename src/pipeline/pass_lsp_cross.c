@@ -968,13 +968,23 @@ bool cbm_pxc_has_cross_lsp(CBMLanguage lang) {
 enum { PXC_SCRATCH_DISPATCH = 0, PXC_SCRATCH_KEYS = 1, PXC_SCRATCH_COUNT = 2 };
 enum { PXC_KEEP_BYTES = 4 * 1024 * 1024 };
 static CBM_TLS bool tl_pxc_keep;
-static CBM_TLS CBMArena tl_pxc_arena[PXC_SCRATCH_COUNT];
-static CBM_TLS bool tl_pxc_live[PXC_SCRATCH_COUNT];
+/* The parked arenas live on the HEAP behind one thread-local pointer. Inline in
+ * thread-local storage they were ~8 KB of static TLS charged to every thread in
+ * the image, and static TLS comes out of each thread's own stack allocation, so
+ * past a certain size a small-stack thread cannot be created at all — which is
+ * precisely how this branch broke the 64 KB parent-death watchdog and, with it,
+ * indexing on x86-64 Linux (PR #2233). The holder is allocated once per
+ * keeping thread, so parking still costs no allocation per file. */
+typedef struct {
+    CBMArena arena[PXC_SCRATCH_COUNT];
+    bool live[PXC_SCRATCH_COUNT];
+} pxc_scratch_t;
+static CBM_TLS pxc_scratch_t *tl_pxc;
 
 static void pxc_scratch_take(int slot, CBMArena *into) {
-    if (tl_pxc_live[slot]) {
-        *into = tl_pxc_arena[slot];
-        tl_pxc_live[slot] = false;
+    if (tl_pxc && tl_pxc->live[slot]) {
+        *into = tl_pxc->arena[slot];
+        tl_pxc->live[slot] = false;
         cbm_arena_rewind(into);
         return;
     }
@@ -982,12 +992,16 @@ static void pxc_scratch_take(int slot, CBMArena *into) {
 }
 
 static void pxc_scratch_give(int slot, CBMArena *from) {
-    if (tl_pxc_keep && !tl_pxc_live[slot] && from->nblocks > 0 &&
-        cbm_arena_capacity(from) <= (size_t)PXC_KEEP_BYTES) {
-        tl_pxc_arena[slot] = *from;
-        tl_pxc_live[slot] = true;
-        memset(from, 0, sizeof(*from));
-        return;
+    if (tl_pxc_keep && from->nblocks > 0 && cbm_arena_capacity(from) <= (size_t)PXC_KEEP_BYTES) {
+        if (!tl_pxc) {
+            tl_pxc = cbm_calloc(CBM_MEM_CLASS_OTHER, sizeof(pxc_scratch_t));
+        }
+        if (tl_pxc && !tl_pxc->live[slot]) {
+            tl_pxc->arena[slot] = *from;
+            tl_pxc->live[slot] = true;
+            memset(from, 0, sizeof(*from));
+            return;
+        }
     }
     cbm_arena_destroy(from);
 }
@@ -997,11 +1011,15 @@ void cbm_pxc_thread_scratch_begin(void) {
 }
 
 void cbm_pxc_thread_scratch_end(void) {
-    for (int slot = 0; slot < PXC_SCRATCH_COUNT; slot++) {
-        if (tl_pxc_live[slot]) {
-            cbm_arena_destroy(&tl_pxc_arena[slot]);
-            tl_pxc_live[slot] = false;
+    if (tl_pxc) {
+        for (int slot = 0; slot < PXC_SCRATCH_COUNT; slot++) {
+            if (tl_pxc->live[slot]) {
+                cbm_arena_destroy(&tl_pxc->arena[slot]);
+                tl_pxc->live[slot] = false;
+            }
         }
+        cbm_free(CBM_MEM_CLASS_OTHER, tl_pxc);
+        tl_pxc = NULL;
     }
     tl_pxc_keep = false;
 }

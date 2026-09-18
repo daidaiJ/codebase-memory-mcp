@@ -1,10 +1,10 @@
 /* Full declaration set for the same CBMArena, and it must precede cbm.h:
  * internal/cbm/arena.h declares a subset and the two share the CBM_ARENA_H
  * guard, so whichever is included first is the one this file sees. */
-#include "foundation/arena.h"    // cbm_arena_init_sized
-#include "foundation/mem_core.h" // class accounting for the bound allocators
+#include "foundation/arena.h"      // cbm_arena_init_sized
+#include "foundation/mem_core.h"   // class accounting for the bound allocators
 #include "foundation/mem_events.h" // waste sanitizer: the bound allocators bypass every observer
-#include "foundation/log.h"      // cbm_log_warn -- extract.lsp.skipped
+#include "foundation/log.h"        // cbm_log_warn -- extract.lsp.skipped
 #include "cbm.h"
 #include "arena.h" // CBMArena, cbm_arena_init/alloc/strdup/destroy
 #include "helpers.h"
@@ -349,19 +349,19 @@ static mi_heap_t *sqlite_heap(void) {
 }
 
 #if defined(CBM_MEMWASTE) && CBM_MEMWASTE
-#define BOUND_ALLOC(block, n, flags)                                                         \
-    do {                                                                                     \
-        if ((block) && cbm_memev_enabled()) {                                                \
-            cbm_memev_alloc_ex((block), (n), mi_usable_size(block),                          \
-                               __builtin_return_address(0), (unsigned)(flags));              \
-        }                                                                                    \
+#define BOUND_ALLOC(block, n, flags)                                                             \
+    do {                                                                                         \
+        if ((block) && cbm_memev_enabled()) {                                                    \
+            cbm_memev_alloc_ex((block), (n), mi_usable_size(block), __builtin_return_address(0), \
+                               (unsigned)(flags));                                               \
+        }                                                                                        \
     } while (0)
-#define BOUND_REALLOC(old_block, grown, n)                                                   \
-    do {                                                                                     \
-        if ((grown) && cbm_memev_enabled()) {                                                \
-            cbm_memev_realloc((old_block), (grown), (n), mi_usable_size(grown),              \
-                              __builtin_return_address(0));                                  \
-        }                                                                                    \
+#define BOUND_REALLOC(old_block, grown, n)                                      \
+    do {                                                                        \
+        if ((grown) && cbm_memev_enabled()) {                                   \
+            cbm_memev_realloc((old_block), (grown), (n), mi_usable_size(grown), \
+                              __builtin_return_address(0));                     \
+        }                                                                       \
     } while (0)
 #define BOUND_FREE(block) cbm_memev_free(block)
 #else
@@ -518,11 +518,33 @@ typedef struct {
     TSFieldId id;
     char name[FIELD_NAME_CACHED_MAX + 1];
 } field_id_slot_t;
-static CBM_TLS field_id_slot_t tl_field_ids[FIELD_CACHE_SLOTS];
+/* On the HEAP behind a thread-local pointer, not a thread-local array: glibc
+ * takes the static TLS block out of each thread's stack allocation, so a 24 KB
+ * array here is 24 KB every thread must fit — and the threads that ask for a
+ * small stack (the 64 KB parent-death watchdog) then fail to start at all,
+ * with EINVAL surfacing nowhere near the growth that caused it. See
+ * cbm_thread_create's fallback for the other half of that lesson. */
+static CBM_TLS field_id_slot_t *tl_field_ids;
+
+static field_id_slot_t *field_cache(void) {
+    if (!tl_field_ids) {
+        tl_field_ids = cbm_calloc(CBM_MEM_CLASS_OTHER, FIELD_CACHE_SLOTS * sizeof(field_id_slot_t));
+    }
+    return tl_field_ids;
+}
+
+static void cbm_ts_field_cache_release_thread(void) {
+    cbm_free(CBM_MEM_CLASS_OTHER, tl_field_ids);
+    tl_field_ids = NULL;
+}
 
 TSNode cbm_ts_child_by_field_name(TSNode node, const char *name, uint32_t name_length) {
     if (!name || name_length == 0 || name_length > FIELD_NAME_CACHED_MAX || ts_node_is_null(node)) {
         return (ts_node_child_by_field_name)(node, name, name_length); /* the real one */
+    }
+    field_id_slot_t *cache = field_cache();
+    if (!cache) {
+        return (ts_node_child_by_field_name)(node, name, name_length); /* uncached, still correct */
     }
     const TSLanguage *lang = ts_node_language(node);
     uint64_t h = 0xcbf29ce484222325ULL ^ (uint64_t)(uintptr_t)lang;
@@ -530,7 +552,7 @@ TSNode cbm_ts_child_by_field_name(TSNode node, const char *name, uint32_t name_l
         h ^= (uint8_t)name[i];
         h *= 0x100000001b3ULL;
     }
-    field_id_slot_t *slot = &tl_field_ids[h & (FIELD_CACHE_SLOTS - 1)];
+    field_id_slot_t *slot = &cache[h & (FIELD_CACHE_SLOTS - 1)];
     if (slot->lang != lang || slot->len != name_length ||
         memcmp(slot->name, name, name_length) != 0) {
         /* The content is compared, never just the pointer: callers also pass
@@ -561,22 +583,33 @@ TSTreeCursor *cbm_thread_cursor(TSNode node) {
  * create and delete a cursor at EVERY node -- 49.8 M cursor stacks on the Go
  * corpus (waste sanitizer, 2026-09-17). Deeper than the pool: private cursors. */
 enum { CURSOR_POOL_DEPTH = 128 };
-static CBM_TLS TSTreeCursor tl_cursor_pool[CURSOR_POOL_DEPTH];
-static CBM_TLS uint8_t tl_cursor_pool_state[CURSOR_POOL_DEPTH]; /* bit0 live, bit1 busy */
+/* Heap-backed for the same reason as the field cache: 4 KB of cursors plus
+ * their state in static TLS is 4 KB charged to every thread in the image, and
+ * it is the kind of growth that makes a small-stack thread refuse to start. */
+typedef struct {
+    TSTreeCursor cursors[CURSOR_POOL_DEPTH];
+    uint8_t state[CURSOR_POOL_DEPTH]; /* bit0 live, bit1 busy */
+} cursor_pool_t;
+static CBM_TLS cursor_pool_t *tl_cursor_pool;
 enum { CURSOR_LIVE = 1, CURSOR_BUSY = 2 };
 
 TSTreeCursor *cbm_cursor_acquire(cbm_cursor_lease_t *lease, int depth, TSNode node) {
-    if (depth >= 0 && depth < CURSOR_POOL_DEPTH && !(tl_cursor_pool_state[depth] & CURSOR_BUSY)) {
-        if (tl_cursor_pool_state[depth] & CURSOR_LIVE) {
-            ts_tree_cursor_reset(&tl_cursor_pool[depth], node);
+    if (!tl_cursor_pool) {
+        tl_cursor_pool = cbm_calloc(CBM_MEM_CLASS_OTHER, sizeof(cursor_pool_t));
+    }
+    cursor_pool_t *pool = tl_cursor_pool;
+    if (pool && depth >= 0 && depth < CURSOR_POOL_DEPTH && !(pool->state[depth] & CURSOR_BUSY)) {
+        if (pool->state[depth] & CURSOR_LIVE) {
+            ts_tree_cursor_reset(&pool->cursors[depth], node);
         } else {
-            tl_cursor_pool[depth] = ts_tree_cursor_new(node);
+            pool->cursors[depth] = ts_tree_cursor_new(node);
         }
-        tl_cursor_pool_state[depth] = CURSOR_LIVE | CURSOR_BUSY;
+        pool->state[depth] = CURSOR_LIVE | CURSOR_BUSY;
         lease->slot = depth;
-        lease->cursor = &tl_cursor_pool[depth];
+        lease->cursor = &pool->cursors[depth];
         return lease->cursor;
     }
+    /* No pool (or the slot is taken): a private cursor is always correct. */
     lease->private_cursor = ts_tree_cursor_new(node);
     lease->slot = -1;
     lease->cursor = &lease->private_cursor;
@@ -586,8 +619,8 @@ TSTreeCursor *cbm_cursor_acquire(cbm_cursor_lease_t *lease, int depth, TSNode no
 void cbm_cursor_release(cbm_cursor_lease_t *lease) {
     if (lease->slot < 0) {
         ts_tree_cursor_delete(&lease->private_cursor);
-    } else {
-        tl_cursor_pool_state[lease->slot] &= (uint8_t)~CURSOR_BUSY;
+    } else if (tl_cursor_pool) {
+        tl_cursor_pool->state[lease->slot] &= (uint8_t)~CURSOR_BUSY;
     }
     lease->cursor = NULL;
 }
@@ -603,13 +636,25 @@ void cbm_destroy_thread_parser(void) {
         ts_tree_cursor_delete(&tl_cursor);
         tl_cursor_live = false;
     }
-    for (int d = 0; d < CURSOR_POOL_DEPTH; d++) {
-        /* a busy slot belongs to a walk still on this stack: leave it */
-        if (tl_cursor_pool_state[d] == CURSOR_LIVE) {
-            ts_tree_cursor_delete(&tl_cursor_pool[d]);
-            tl_cursor_pool_state[d] = 0;
+    if (tl_cursor_pool) {
+        bool busy = false;
+        for (int d = 0; d < CURSOR_POOL_DEPTH; d++) {
+            /* a busy slot belongs to a walk still on this stack: leave it */
+            if (tl_cursor_pool->state[d] == CURSOR_LIVE) {
+                ts_tree_cursor_delete(&tl_cursor_pool->cursors[d]);
+                tl_cursor_pool->state[d] = 0;
+            } else if (tl_cursor_pool->state[d] & CURSOR_BUSY) {
+                busy = true;
+            }
+        }
+        /* Outstanding leases point INTO this block, so it is only released once
+         * no walk still holds a slot. */
+        if (!busy) {
+            cbm_free(CBM_MEM_CLASS_OTHER, tl_cursor_pool);
+            tl_cursor_pool = NULL;
         }
     }
+    cbm_ts_field_cache_release_thread();
 }
 
 void cbm_shutdown(void) {
@@ -2408,7 +2453,13 @@ static CBM_TLS bool tl_work_arena_live = false;
  * worth holding). Before this every file created and destroyed a
  * 512 KB block -- 28,145 of them on the Go corpus, 14 GB allocated, 99.9 %
  * never written and 7,136 never touched (waste sanitizer, 2026-09-17). */
-static CBM_TLS CBMArena tl_scratch_arena;
+/* The parked arena lives on the HEAP, reached through a thread-local pointer,
+ * not inline in thread-local storage: a CBMArena is ~4 KB (256 block pointers
+ * and 256 sizes), and static TLS is charged to every thread AND taken out of
+ * each thread's stack allocation — enough of it and a small-stack thread stops
+ * being creatable at all (PR #2233). The holder is allocated once per thread
+ * and reused, so parking still costs no allocation per file. */
+static CBM_TLS CBMArena *tl_scratch_slot;
 static CBM_TLS bool tl_scratch_live = false;
 static CBM_TLS bool tl_scratch_keep = false;
 
@@ -2427,10 +2478,12 @@ void cbm_work_arena_release(void) {
         cbm_arena_destroy(&tl_work_arena);
         tl_work_arena_live = false;
     }
-    if (tl_scratch_live) {
-        cbm_arena_destroy(&tl_scratch_arena);
+    if (tl_scratch_live && tl_scratch_slot) {
+        cbm_arena_destroy(tl_scratch_slot);
         tl_scratch_live = false;
     }
+    cbm_free(CBM_MEM_CLASS_OTHER, tl_scratch_slot);
+    tl_scratch_slot = NULL;
     cbm_result_compact_release_thread();
     tl_scratch_keep = false;
 }
@@ -2472,16 +2525,16 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
                                    const char **include_paths, const CBMMacroTable *macro_table,
                                    const CBMReturnTypeTable *return_type_table) {
     CBMArena scratch;
-    if (tl_scratch_live) {
-        scratch = tl_scratch_arena;
+    if (tl_scratch_live && tl_scratch_slot) {
+        scratch = *tl_scratch_slot;
         tl_scratch_live = false;
         cbm_arena_rewind(&scratch);
     } else {
         cbm_arena_init_lazy(&scratch, CBM_EXTRACT_SCRATCH_BLOCK);
     }
-    CBMFileResult *result =
-        extract_file_ex_body(source, source_len, language, project, rel_path, timeout_micros,
-                             extra_defines, include_paths, macro_table, return_type_table, &scratch);
+    CBMFileResult *result = extract_file_ex_body(source, source_len, language, project, rel_path,
+                                                 timeout_micros, extra_defines, include_paths,
+                                                 macro_table, return_type_table, &scratch);
     /* !tl_scratch_live: a nested extraction (an embedded language inside this
      * file) may already have parked its own; never overwrite it. */
     /* Kept up to CBM_EXTRACT_SCRATCH_KEEP_BYTES, grown blocks included: the
@@ -2490,8 +2543,15 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
      * arena turned those files into fresh 512 KB blocks for the next file. */
     if (tl_scratch_keep && !tl_scratch_live && scratch.nblocks > 0 &&
         cbm_arena_capacity(&scratch) <= (size_t)CBM_EXTRACT_SCRATCH_KEEP_BYTES) {
-        tl_scratch_arena = scratch;
-        tl_scratch_live = true;
+        if (!tl_scratch_slot) {
+            tl_scratch_slot = cbm_alloc(CBM_MEM_CLASS_OTHER, sizeof(CBMArena));
+        }
+        if (tl_scratch_slot) {
+            *tl_scratch_slot = scratch;
+            tl_scratch_live = true;
+        } else {
+            cbm_arena_destroy(&scratch); /* no holder: keep nothing, stay correct */
+        }
     } else {
         cbm_arena_destroy(&scratch);
     }

@@ -13,6 +13,7 @@
 
 #include <mimalloc.h> /* mi_thread_done at thread exit */
 
+#include <errno.h> /* EINVAL — a refused stack-size hint, see cbm_thread_create */
 #include <pthread.h>
 #include <stdlib.h>
 
@@ -178,6 +179,24 @@ int cbm_thread_create(cbm_thread_t *t, size_t stack_size, void *(*fn)(void *), v
     pthread_attr_setstacksize(&attr, stack_size);
     int rc = pthread_create(&t->handle, &attr, fn, arg);
     pthread_attr_destroy(&attr);
+    if (rc == EINVAL) {
+        /* glibc carves the static TLS block out of the thread's own stack
+         * allocation, so a small REQUESTED stack stops being legal the moment
+         * the image's TLS grows — no warning where the growth happens, only
+         * EINVAL here, from then on. That is exactly how the 64 KB
+         * parent-death watchdog stopped starting once this image's TLS passed
+         * it (PR #2233): the worker then refused to index without containment
+         * and SIGKILLed its own group, so every venue reported nothing but
+         * "killed (signal 9)".
+         * A stack size is a hint about how much this thread needs; the platform
+         * refusing the hint is not a reason to fail to create the thread. Fall
+         * back to the default stack, which always has room for the TLS block. */
+        pthread_attr_t fallback;
+        pthread_attr_init(&fallback);
+        pthread_attr_setstacksize(&fallback, cbm_thread_default_stack_size());
+        rc = pthread_create(&t->handle, &fallback, fn, arg);
+        pthread_attr_destroy(&fallback);
+    }
     return rc;
 }
 
