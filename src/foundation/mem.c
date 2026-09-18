@@ -6,7 +6,9 @@
  * RSS queries (task_info on macOS, /proc/self/statm on Linux,
  * GetProcessMemoryInfo on Windows).
  */
+#include "foundation/mem_events.h"
 #include "mem.h"
+#include "mem_core.h" /* cbm_mem_tracked_live_bytes */
 #include "platform.h"
 #include "log.h"
 #include "compat_fs.h"
@@ -526,12 +528,22 @@ size_t cbm_mem_allocator_committed(void) {
 
 static _Atomic size_t g_peak_charged;
 size_t cbm_mem_charged(void) {
-    /* The OS number (phys_footprint on macOS, RSS elsewhere) is the charge
-     * for everything the process maps; the allocator's committed bytes are
-     * the floor for the memory we hold through mimalloc. macOS was measured
-     * under-reporting the former after MADV_FREE_REUSABLE cycles (kernel
-     * extraction: 4.1 GB charged, 15.6 GB committed, 13.4 GB tracked live),
-     * so the larger of the two is the honest reading. */
+    /* The OS number (phys_footprint on macOS, RSS elsewhere) is the charge for
+     * everything the process maps, and the memory core's own live bytes are its
+     * floor: macOS was measured under-reporting the OS number after
+     * MADV_FREE_REUSABLE cycles (kernel extraction: 4.1 GB charged, 13.4 GB
+     * tracked live), so the larger of the two is the honest reading.
+     *
+     * NOT the allocator's committed bytes. mimalloc only decrements that
+     * counter when a decommit will need a matching recommit, and in a RELEASE
+     * build it never will (prim/unix/prim.c: `#if !MI_DEBUG && MI_SECURE<=2`
+     * sets needs_recommit=false), so a purge hands the pages back to the OS and
+     * leaves the counter where it was. Measured on the kernel, 2026-09-17: 77 GB
+     * purged, the counter flat at 14.8 GB, macOS phys_footprint 5.2 GB. Reading
+     * it as the charge pinned the budget at its limit -- the spill sweep freed
+     * 10 GB and the number did not move, so the semantic pass ran with zero
+     * headroom and the run reported a 32 % budget overshoot that never happened.
+     * It stays in the logs (commit_mb) as a diagnostic. */
 #if defined(__APPLE__)
     size_t os_charge = cbm_mem_footprint();
     if (os_charge == 0) {
@@ -540,8 +552,8 @@ size_t cbm_mem_charged(void) {
 #else
     size_t os_charge = cbm_mem_rss();
 #endif
-    size_t committed = cbm_mem_allocator_committed();
-    size_t charged = committed > os_charge ? committed : os_charge;
+    size_t tracked = cbm_mem_tracked_live_bytes();
+    size_t charged = tracked > os_charge ? tracked : os_charge;
     /* High-water mark of the charge itself, at the granularity of the gate
      * that reads it (every file pull, every phase mark). RSS high-water
      * counts pages already purged to the OS but not yet reclaimed
@@ -822,7 +834,40 @@ bool cbm_mem_phases_enabled(void) {
     return mem_phase_enabled();
 }
 
+/* One line of mimalloc's stats table, logged as it comes. */
+static void mem_allocator_stats_line(const char *msg, void *arg) {
+    if (!msg || !msg[0]) {
+        return;
+    }
+    char line[512];
+    size_t n = 0;
+    for (const char *p = msg; *p && n + 1 < sizeof(line); p++) {
+        line[n++] = (*p == '\n' || *p == '\r' || *p == '\t') ? ' ' : *p;
+    }
+    line[n] = '\0';
+    /* trailing blanks make the log unreadable; trim */
+    while (n > 0 && line[n - 1] == ' ') {
+        line[--n] = '\0';
+    }
+    if (line[0] == '\0') {
+        return;
+    }
+    cbm_log_info("mem.allocator.stats", "tag", (const char *)arg, "line", line);
+}
+
+void cbm_mem_allocator_stats_log(const char *tag) {
+    char enabled[CBM_SZ_16];
+    if (cbm_safe_getenv("CBM_MEM_ALLOCATOR_STATS", enabled, sizeof(enabled), NULL) == NULL) {
+        return;
+    }
+    if (enabled[0] == '0' && enabled[1] == '\0') {
+        return;
+    }
+    mi_stats_print_out(mem_allocator_stats_line, (void *)(tag ? tag : "-"));
+}
+
 void cbm_mem_phase_mark(const char *label) {
+    cbm_memev_phase(label); /* waste sanitizer: dormant unless CBM_MEMWASTE=1 */
     if (!mem_phase_enabled()) {
         return;
     }

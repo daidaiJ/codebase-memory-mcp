@@ -260,6 +260,12 @@ void cbm_mem_phase_reset(void);
  * Instruments that walk large structures (the result census) gate on it. */
 bool cbm_mem_phases_enabled(void);
 
+/* CBM_MEM_ALLOCATOR_STATS=1: write the allocator's own reserved / committed /
+ * purged table into the log at `tag`. The worker leaves through _Exit, so
+ * mimalloc's at-exit statistics never appear; this is the way to see them.
+ * Inert unless the variable is set. */
+void cbm_mem_allocator_stats_log(const char *tag);
+
 /* Write the phase table as a JSON array of {label, bytes, hits}, biggest total
  * first. Returns bytes written (0 when disabled or empty). */
 int cbm_mem_phase_report_json(char *out, size_t size);
