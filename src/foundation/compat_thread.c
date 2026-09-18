@@ -4,6 +4,7 @@
  * POSIX: thin wrappers around pthreads and posix_memalign.
  * Windows: CreateThread, CRITICAL_SECTION, _aligned_malloc.
  */
+#include "foundation/mem_events.h"
 #include "foundation/constants.h"
 #include "foundation/compat_thread.h"
 
@@ -93,6 +94,9 @@ static bool thread_release_heap_enabled(void) {
 static void NTAPI cbm_thread_detach_callback(PVOID handle, DWORD reason, PVOID reserved) {
     (void)handle;
     (void)reserved;
+    if (reason == DLL_THREAD_DETACH) {
+        cbm_memev_thread_end(); /* waste-sanitizer thread state; no-op outside that build */
+    }
     if (reason == DLL_THREAD_DETACH && thread_release_heap_enabled()) {
         mi_thread_done();
     }
@@ -204,6 +208,16 @@ void cbm_mutex_init(cbm_mutex_t *m) {
 }
 
 void cbm_mutex_lock(cbm_mutex_t *m) {
+#if defined(CBM_MEMWASTE) && CBM_MEMWASTE
+    if (cbm_memev_enabled()) {
+        bool contended = !TryEnterCriticalSection(&m->cs);
+        if (contended) {
+            EnterCriticalSection(&m->cs);
+        }
+        cbm_work_note(CBM_WORK_MUTEX, __builtin_return_address(0), 0, contended ? 1 : 0, 0);
+        return;
+    }
+#endif
     EnterCriticalSection(&m->cs);
 }
 
@@ -222,7 +236,13 @@ void cbm_mutex_init(cbm_mutex_t *m) {
 }
 
 void cbm_mutex_lock(cbm_mutex_t *m) {
+#if defined(CBM_MEMWASTE) && CBM_MEMWASTE
+    /* pthread_mutex_lock itself counts in this flavour; going through the same
+     * lock with our caller as the site keeps the attribution and counts once. */
+    (void)cbm_memev_mutex_lock(&m->mtx, __builtin_return_address(0));
+#else
     pthread_mutex_lock(&m->mtx);
+#endif
 }
 
 void cbm_mutex_unlock(cbm_mutex_t *m) {

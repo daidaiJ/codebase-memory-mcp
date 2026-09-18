@@ -1178,6 +1178,48 @@ TEST(pipeline_minhash_incremental_new_clone) {
  * Suite Registration
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* The reused dedup set answers exactly what a fresh one does, query after
+ * query: same candidates, same order, no leakage between queries. */
+TEST(lsh_reused_seen_set_matches_fresh_query) {
+    enum { ENTRY_COUNT = 40, QUERIES = 6 };
+    static cbm_minhash_t fps[ENTRY_COUNT];
+    static cbm_lsh_entry_t entries[ENTRY_COUNT];
+    cbm_lsh_index_t *idx = cbm_lsh_new();
+    for (int e = 0; e < ENTRY_COUNT; e++) {
+        for (int i = 0; i < CBM_MINHASH_K; i++) {
+            /* Neighbouring entries share most values, so buckets collide and
+             * the same candidate turns up through several bands. */
+            fps[e].values[i] = (uint32_t)((i * 7 + 13) + (i % 4 == 0 ? e / 3 : 0));
+        }
+        entries[e].node_id = e + 1;
+        entries[e].fingerprint = &fps[e];
+        entries[e].file_path = "a.go";
+        entries[e].file_ext = ".go";
+        entries[e].qualified_name = "pkg.fn";
+        cbm_lsh_insert(idx, &entries[e]);
+    }
+
+    cbm_lsh_seen_t *seen = cbm_lsh_seen_new();
+    ASSERT_NOT_NULL(seen);
+    enum { CAP = 64 };
+    const cbm_lsh_entry_t *fresh_buf[CAP];
+    const cbm_lsh_entry_t *reused_buf[CAP];
+    int total = 0;
+    for (int q = 0; q < QUERIES; q++) {
+        int fresh = cbm_lsh_query_into(idx, &fps[q * 3], fresh_buf, CAP);
+        int reused = cbm_lsh_query_into_seen(idx, &fps[q * 3], reused_buf, CAP, seen);
+        ASSERT_EQ(reused, fresh);
+        for (int i = 0; i < fresh; i++) {
+            ASSERT_EQ(reused_buf[i]->node_id, fresh_buf[i]->node_id);
+        }
+        total += fresh;
+    }
+    ASSERT_GT(total, 0); /* the queries really returned candidates */
+    cbm_lsh_seen_free(seen);
+    cbm_lsh_free(idx);
+    PASS();
+}
+
 SUITE(simhash) {
     /* Suite 1: MinHash Core */
     RUN_TEST(minhash_identical_source_same_fingerprint);
@@ -1194,6 +1236,7 @@ SUITE(simhash) {
     RUN_TEST(minhash_hex_roundtrip);
     RUN_TEST(lsh_same_bucket_similar);
     RUN_TEST(lsh_different_bucket_dissimilar);
+    RUN_TEST(lsh_reused_seen_set_matches_fresh_query);
     RUN_TEST(lsh_index_build_and_query);
 
     /* Suite 3: Edge Generation */

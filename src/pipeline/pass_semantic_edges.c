@@ -704,12 +704,22 @@ static void vec_build_worker(int worker_id, void *ctx_ptr) {
         int tc = vc->token_counts[f];
         char **tokens = &vc->all_tokens[vc->offsets[f]];
 
+        /* Each token is resolved to its corpus index ONCE: both loops below ask
+         * about every token, and asking by name cost a hash lookup plus a
+         * strtol per question -- three per token (35 M repeated lookups of an
+         * unchanged table on the Go corpus, waste sanitizer 2026-09-17). */
+        int *token_index = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)tc * sizeof(int));
+        for (int t = 0; token_index && t < tc; t++) {
+            token_index[t] = cbm_sem_corpus_token_index(vc->corpus, tokens[t]);
+        }
+
         /* TF-IDF weights */
         int *indices = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)tc * sizeof(int));
         float *weights = cbm_alloc(CBM_MEM_CLASS_SEMANTIC, (size_t)tc * sizeof(float));
         int tfidf_len = 0;
         for (int t = 0; t < tc; t++) {
-            float idf = cbm_sem_corpus_idf(vc->corpus, tokens[t]);
+            float idf = token_index ? cbm_sem_corpus_idf_at(vc->corpus, token_index[t])
+                                    : cbm_sem_corpus_idf(vc->corpus, tokens[t]);
             if (idf > 0.0F) {
                 indices[tfidf_len] = t;
                 weights[tfidf_len] = idf;
@@ -726,12 +736,16 @@ static void vec_build_worker(int worker_id, void *ctx_ptr) {
         cbm_sem_vec_t ri_dense;
         memset(&ri_dense, 0, sizeof(cbm_sem_vec_t));
         for (int t = 0; t < tc; t++) {
-            const cbm_sem_vec_t *ri = cbm_sem_corpus_ri_vec(vc->corpus, tokens[t]);
+            const cbm_sem_vec_t *ri = token_index
+                                          ? cbm_sem_corpus_ri_vec_at(vc->corpus, token_index[t])
+                                          : cbm_sem_corpus_ri_vec(vc->corpus, tokens[t]);
             if (ri) {
-                float idf = cbm_sem_corpus_idf(vc->corpus, tokens[t]);
+                float idf = token_index ? cbm_sem_corpus_idf_at(vc->corpus, token_index[t])
+                                        : cbm_sem_corpus_idf(vc->corpus, tokens[t]);
                 cbm_sem_vec_add_scaled(&ri_dense, ri, idf);
             }
         }
+        cbm_free(CBM_MEM_CLASS_SEMANTIC, token_index);
         cbm_sem_normalize(&ri_dense);
         cbm_rsq_encode(ri_dense.v, &vc->funcs[f].ri_code);
 
@@ -829,18 +843,30 @@ enum {
     SCORE_SEEN_EMPTY = -1,
 };
 
-/* Check whether `j` has already been recorded in the open-addressed `seen`
- * set for this function; insert it if not.  Returns true when the insertion
- * was fresh (caller should add to candidates). */
-static bool score_seen_insert(int *seen, int j) {
+/* The open-addressed `seen` set of one worker, reused for every function it
+ * scores: a slot belongs to the current function only when its stamp says so,
+ * so starting a function costs nothing where re-filling 8,192 slots cost a
+ * 32 KB write per function (90 k on the Go corpus, waste sanitizer
+ * 2026-09-17). Same size and probe order: the same candidates, in order. */
+typedef struct {
+    int ids[SCORE_SEEN_CAP];
+    int stamp[SCORE_SEEN_CAP];
+    int current; /* function index + 1: unique per function, never 0 */
+} score_seen_t;
+
+/* Check whether `j` has already been recorded in the `seen` set for this
+ * function; insert it if not.  Returns true when the insertion was fresh
+ * (caller should add to candidates). */
+static bool score_seen_insert(score_seen_t *seen, int j) {
     uint32_t slot = (uint32_t)j & SCORE_SEEN_MASK;
     for (int p = 0; p < SCORE_SEEN_CAP; p++) {
         uint32_t idx = (slot + (uint32_t)p) & SCORE_SEEN_MASK;
-        if (seen[idx] == SCORE_SEEN_EMPTY) {
-            seen[idx] = j;
+        if (seen->stamp[idx] != seen->current) {
+            seen->stamp[idx] = seen->current;
+            seen->ids[idx] = j;
             return true;
         }
-        if (seen[idx] == j) {
+        if (seen->ids[idx] == j) {
             return false;
         }
     }
@@ -850,7 +876,7 @@ static bool score_seen_insert(int *seen, int j) {
 /* Collect the unique candidate function indices for node `i` by iterating
  * every LSH band and merging bucket members via `seen[]`.  Returns the
  * populated candidate count. */
-static int score_collect_candidates(score_ctx_t *sc, int i, int *seen, int *candidates,
+static int score_collect_candidates(score_ctx_t *sc, int i, score_seen_t *seen, int *candidates,
                                     int cand_cap) {
     int cand_count = 0;
     for (int b = 0; b < SEM_LSH_BANDS && cand_count < cand_cap; b++) {
@@ -902,22 +928,24 @@ static void score_try_emit(score_ctx_t *sc, int i, int j, int c, deferred_edge_b
 static void score_worker(int worker_id, void *ctx_ptr) {
     score_ctx_t *sc = ctx_ptr;
     deferred_edge_buf_t *my_buf = &sc->worker_bufs[worker_id];
+    score_seen_t *seen = cbm_calloc(CBM_MEM_CLASS_SEMANTIC, sizeof(score_seen_t));
+    if (!seen) {
+        return; /* the other workers claim the functions this one leaves */
+    }
 
     while (true) {
         int i = atomic_fetch_add_explicit(&sc->next_idx, SKIP_ONE, memory_order_relaxed);
         if (i >= sc->func_count) {
             break;
         }
-        int seen[SCORE_SEEN_CAP];
-        for (int s = 0; s < SCORE_SEEN_CAP; s++) {
-            seen[s] = SCORE_SEEN_EMPTY;
-        }
+        seen->current = i + SKIP_ONE;
         int candidates[SEM_MAX_CANDIDATES];
         int cand_count = score_collect_candidates(sc, i, seen, candidates, SEM_MAX_CANDIDATES);
         for (int c = 0; c < cand_count; c++) {
             score_try_emit(sc, i, candidates[c], c, my_buf);
         }
     }
+    cbm_free(CBM_MEM_CLASS_SEMANTIC, seen);
 }
 
 /* ── Parallel Phase 1b: decode minhash/profile + build per-func vectors ── */

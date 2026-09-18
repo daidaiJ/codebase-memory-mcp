@@ -578,6 +578,44 @@ TEST(resolve_import_reachable_prefix) {
     PASS();
 }
 
+/* The per-file reachability memo answers exactly what the uncached check
+ * answers, file after file: its key arena opens on the first memoized key and
+ * is destroyed with the file, and one key is longer than the arena's first
+ * block. The two files import different packages, so a memo leaking between
+ * files would flip an answer. */
+TEST(reach_cache_memo_matches_uncached_across_files) {
+    static char long_qn[6000];
+    memset(long_qn, 'a', sizeof(long_qn) - 1);
+    long_qn[sizeof(long_qn) - 1] = '\0';
+    memcpy(long_qn, "pkg.io.", 7);
+    long_qn[5000] = '.';
+    const char *cands[] = {"pkg.io.Reader", "pkg.net.Dial", "other.fmt.Println", long_qn};
+    enum { NCANDS = 4 };
+    const char *imports_io[] = {"pkg.io"};
+    const char *imports_net[] = {"pkg.net", "other.fmt"};
+    for (int file = 0; file < 4; file++) {
+        bool io = (file % 2) == 0;
+        const char **imports = io ? imports_io : imports_net;
+        int nimports = io ? 1 : 2;
+        bool expect[NCANDS];
+        for (int i = 0; i < NCANDS; i++) {
+            expect[i] = cbm_registry_is_import_reachable(cands[i], imports, nimports);
+        }
+        /* the uncached answers really differ between the files */
+        ASSERT_EQ(expect[0], io);
+        ASSERT_EQ(expect[1], !io);
+        ASSERT_EQ(expect[3], io);
+        cbm_registry_reach_cache_begin(8);
+        for (int pass = 0; pass < 2; pass++) { /* the second pass is served by the memo */
+            for (int i = 0; i < NCANDS; i++) {
+                ASSERT_EQ(cbm_registry_is_import_reachable(cands[i], imports, nimports), expect[i]);
+            }
+        }
+        cbm_registry_reach_cache_end();
+    }
+    PASS();
+}
+
 /* ── Negative import evidence ─────────────────────────────────── */
 
 TEST(negative_import_rejects_unimported) {
@@ -1046,6 +1084,7 @@ SUITE(registry) {
     /* Import reachability */
     RUN_TEST(resolve_is_import_reachable);
     RUN_TEST(resolve_import_reachable_prefix);
+    RUN_TEST(reach_cache_memo_matches_uncached_across_files);
     /* Negative import evidence */
     RUN_TEST(negative_import_rejects_unimported);
     /* Fuzzy resolve */

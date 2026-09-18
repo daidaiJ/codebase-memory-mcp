@@ -3,6 +3,7 @@
  * guard, so whichever is included first is the one this file sees. */
 #include "foundation/arena.h"    // cbm_arena_init_sized
 #include "foundation/mem_core.h" // class accounting for the bound allocators
+#include "foundation/mem_events.h" // waste sanitizer: the bound allocators bypass every observer
 #include "foundation/log.h"      // cbm_log_warn -- extract.lsp.skipped
 #include "cbm.h"
 #include "arena.h" // CBMArena, cbm_arena_init/alloc/strdup/destroy
@@ -347,28 +348,55 @@ static mi_heap_t *sqlite_heap(void) {
     return tl_sqlite_heap;
 }
 
+#if defined(CBM_MEMWASTE) && CBM_MEMWASTE
+#define BOUND_ALLOC(block, n, flags)                                                         \
+    do {                                                                                     \
+        if ((block) && cbm_memev_enabled()) {                                                \
+            cbm_memev_alloc_ex((block), (n), mi_usable_size(block),                          \
+                               __builtin_return_address(0), (unsigned)(flags));              \
+        }                                                                                    \
+    } while (0)
+#define BOUND_REALLOC(old_block, grown, n)                                                   \
+    do {                                                                                     \
+        if ((grown) && cbm_memev_enabled()) {                                                \
+            cbm_memev_realloc((old_block), (grown), (n), mi_usable_size(grown),              \
+                              __builtin_return_address(0));                                  \
+        }                                                                                    \
+    } while (0)
+#define BOUND_FREE(block) cbm_memev_free(block)
+#else
+#define BOUND_ALLOC(block, n, flags) ((void)0)
+#define BOUND_REALLOC(old_block, grown, n) ((void)0)
+#define BOUND_FREE(block) ((void)0)
+#endif
+
 static void *cbm_sqlite_malloc(int n) {
     mi_heap_t *heap = sqlite_heap();
     void *block = heap ? mi_heap_malloc(heap, (size_t)n) : mi_malloc((size_t)n);
     if (block) {
         cbm_mem_class_add_external(CBM_MEM_CLASS_STORE, mi_usable_size(block));
     }
+    BOUND_ALLOC(block, (size_t)n, 0);
     return block;
 }
 static void cbm_sqlite_free(void *p) {
     if (p) {
         cbm_mem_class_remove_external(CBM_MEM_CLASS_STORE, mi_usable_size(p));
+        BOUND_FREE(p);
     }
     mi_free(p);
 }
 static void *cbm_sqlite_realloc(void *p, int n) {
     size_t old_size = p ? mi_usable_size(p) : 0;
     mi_heap_t *heap = sqlite_heap();
+    CBM_MEMEV_BACKING(1);
     void *grown = heap ? mi_heap_realloc(heap, p, (size_t)n) : mi_realloc(p, (size_t)n);
+    CBM_MEMEV_BACKING(-1);
     if (grown) {
         cbm_mem_class_remove_external(CBM_MEM_CLASS_STORE, old_size);
         cbm_mem_class_add_external(CBM_MEM_CLASS_STORE, mi_usable_size(grown));
     }
+    BOUND_REALLOC(p, grown, (size_t)n);
     return grown;
 }
 static int cbm_sqlite_size(void *p) {
@@ -384,6 +412,7 @@ static void *cbm_ts_malloc(size_t n) {
     if (block) {
         cbm_mem_class_add_external(CBM_MEM_CLASS_TS_TREE, mi_usable_size(block));
     }
+    BOUND_ALLOC(block, n, 0);
     return block;
 }
 static void *cbm_ts_calloc(size_t count, size_t size) {
@@ -391,20 +420,25 @@ static void *cbm_ts_calloc(size_t count, size_t size) {
     if (block) {
         cbm_mem_class_add_external(CBM_MEM_CLASS_TS_TREE, mi_usable_size(block));
     }
+    BOUND_ALLOC(block, count * size, CBM_MEMEV_ZEROED);
     return block;
 }
 static void *cbm_ts_realloc(void *p, size_t n) {
     size_t old_size = p ? mi_usable_size(p) : 0;
+    CBM_MEMEV_BACKING(1);
     void *grown = mi_realloc(p, n);
+    CBM_MEMEV_BACKING(-1);
     if (grown) {
         cbm_mem_class_remove_external(CBM_MEM_CLASS_TS_TREE, old_size);
         cbm_mem_class_add_external(CBM_MEM_CLASS_TS_TREE, mi_usable_size(grown));
     }
+    BOUND_REALLOC(p, grown, n);
     return grown;
 }
 static void cbm_ts_free(void *p) {
     if (p) {
         cbm_mem_class_remove_external(CBM_MEM_CLASS_TS_TREE, mi_usable_size(p));
+        BOUND_FREE(p);
     }
     mi_free(p);
 }
@@ -477,12 +511,104 @@ void cbm_reset_thread_parser(void) {
     }
 }
 
+enum { FIELD_CACHE_SLOTS = 512, FIELD_NAME_CACHED_MAX = 31 };
+typedef struct {
+    const TSLanguage *lang;
+    uint32_t len;
+    TSFieldId id;
+    char name[FIELD_NAME_CACHED_MAX + 1];
+} field_id_slot_t;
+static CBM_TLS field_id_slot_t tl_field_ids[FIELD_CACHE_SLOTS];
+
+TSNode cbm_ts_child_by_field_name(TSNode node, const char *name, uint32_t name_length) {
+    if (!name || name_length == 0 || name_length > FIELD_NAME_CACHED_MAX || ts_node_is_null(node)) {
+        return (ts_node_child_by_field_name)(node, name, name_length); /* the real one */
+    }
+    const TSLanguage *lang = ts_node_language(node);
+    uint64_t h = 0xcbf29ce484222325ULL ^ (uint64_t)(uintptr_t)lang;
+    for (uint32_t i = 0; i < name_length; i++) {
+        h ^= (uint8_t)name[i];
+        h *= 0x100000001b3ULL;
+    }
+    field_id_slot_t *slot = &tl_field_ids[h & (FIELD_CACHE_SLOTS - 1)];
+    if (slot->lang != lang || slot->len != name_length ||
+        memcmp(slot->name, name, name_length) != 0) {
+        /* The content is compared, never just the pointer: callers also pass
+         * names built in reused buffers. */
+        slot->id = ts_language_field_id_for_name(lang, name, name_length);
+        slot->lang = lang;
+        slot->len = name_length;
+        memcpy(slot->name, name, name_length);
+    }
+    return ts_node_child_by_field_id(node, slot->id);
+}
+
+static CBM_TLS TSTreeCursor tl_cursor;
+static CBM_TLS bool tl_cursor_live = false;
+
+TSTreeCursor *cbm_thread_cursor(TSNode node) {
+    if (tl_cursor_live) {
+        ts_tree_cursor_reset(&tl_cursor, node);
+    } else {
+        tl_cursor = ts_tree_cursor_new(node);
+        tl_cursor_live = true;
+    }
+    return &tl_cursor;
+}
+
+/* Per-depth cursors for recursive walks (cbm_cursor_acquire). A walk at depth d
+ * holds slot d while it recurses into depth d + 1; the LSP call walkers used to
+ * create and delete a cursor at EVERY node -- 49.8 M cursor stacks on the Go
+ * corpus (waste sanitizer, 2026-09-17). Deeper than the pool: private cursors. */
+enum { CURSOR_POOL_DEPTH = 128 };
+static CBM_TLS TSTreeCursor tl_cursor_pool[CURSOR_POOL_DEPTH];
+static CBM_TLS uint8_t tl_cursor_pool_state[CURSOR_POOL_DEPTH]; /* bit0 live, bit1 busy */
+enum { CURSOR_LIVE = 1, CURSOR_BUSY = 2 };
+
+TSTreeCursor *cbm_cursor_acquire(cbm_cursor_lease_t *lease, int depth, TSNode node) {
+    if (depth >= 0 && depth < CURSOR_POOL_DEPTH && !(tl_cursor_pool_state[depth] & CURSOR_BUSY)) {
+        if (tl_cursor_pool_state[depth] & CURSOR_LIVE) {
+            ts_tree_cursor_reset(&tl_cursor_pool[depth], node);
+        } else {
+            tl_cursor_pool[depth] = ts_tree_cursor_new(node);
+        }
+        tl_cursor_pool_state[depth] = CURSOR_LIVE | CURSOR_BUSY;
+        lease->slot = depth;
+        lease->cursor = &tl_cursor_pool[depth];
+        return lease->cursor;
+    }
+    lease->private_cursor = ts_tree_cursor_new(node);
+    lease->slot = -1;
+    lease->cursor = &lease->private_cursor;
+    return lease->cursor;
+}
+
+void cbm_cursor_release(cbm_cursor_lease_t *lease) {
+    if (lease->slot < 0) {
+        ts_tree_cursor_delete(&lease->private_cursor);
+    } else {
+        tl_cursor_pool_state[lease->slot] &= (uint8_t)~CURSOR_BUSY;
+    }
+    lease->cursor = NULL;
+}
+
 void cbm_destroy_thread_parser(void) {
     // Full cleanup: delete the parser. Call on worker thread exit.
     if (tl_parser) {
         ts_parser_delete(tl_parser);
         tl_parser = NULL;
         tl_parser_lang = CBM_LANG_COUNT;
+    }
+    if (tl_cursor_live) {
+        ts_tree_cursor_delete(&tl_cursor);
+        tl_cursor_live = false;
+    }
+    for (int d = 0; d < CURSOR_POOL_DEPTH; d++) {
+        /* a busy slot belongs to a walk still on this stack: leave it */
+        if (tl_cursor_pool_state[d] == CURSOR_LIVE) {
+            ts_tree_cursor_delete(&tl_cursor_pool[d]);
+            tl_cursor_pool_state[d] = 0;
+        }
     }
 }
 
@@ -1635,6 +1761,7 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
  * that bound and so a singleton OS allocation. One file in twelve thousand
  * pays it, which is why the cost is accepted. */
 enum { CBM_EXTRACT_SCRATCH_BLOCK = CBM_SZ_512 * CBM_SZ_1K };
+enum { CBM_EXTRACT_SCRATCH_KEEP_BYTES = 4 * CBM_SZ_1K * CBM_SZ_1K };
 
 static CBMFileResult *extract_file_ex_body(const char *source, int source_len, CBMLanguage language,
                                            const char *project, const char *rel_path,
@@ -2274,6 +2401,17 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
 static CBM_TLS CBMArena tl_work_arena;
 static CBM_TLS bool tl_work_arena_live = false;
 
+/* The traversal scratch arena is kept per worker the same way. A thread keeps
+ * one only after it has given a working arena back (so only pipeline workers,
+ * which call cbm_work_arena_release when they end), and only while it holds no
+ * more than CBM_EXTRACT_SCRATCH_KEEP_BYTES (an outsized file's arena is not
+ * worth holding). Before this every file created and destroyed a
+ * 512 KB block -- 28,145 of them on the Go corpus, 14 GB allocated, 99.9 %
+ * never written and 7,136 never touched (waste sanitizer, 2026-09-17). */
+static CBM_TLS CBMArena tl_scratch_arena;
+static CBM_TLS bool tl_scratch_live = false;
+static CBM_TLS bool tl_scratch_keep = false;
+
 void cbm_work_arena_take(CBMArena *into) {
     if (tl_work_arena_live) {
         *into = tl_work_arena;
@@ -2289,12 +2427,27 @@ void cbm_work_arena_release(void) {
         cbm_arena_destroy(&tl_work_arena);
         tl_work_arena_live = false;
     }
+    if (tl_scratch_live) {
+        cbm_arena_destroy(&tl_scratch_arena);
+        tl_scratch_live = false;
+    }
+    cbm_result_compact_release_thread();
+    tl_scratch_keep = false;
+}
+
+bool cbm_work_arena_keeping(void) {
+    return tl_scratch_keep;
+}
+
+void cbm_work_arena_keep_begin(void) {
+    tl_scratch_keep = true;
 }
 
 void cbm_work_arena_give(CBMArena *from) {
     if (!from || from->nblocks == 0) {
         return;
     }
+    tl_scratch_keep = true; /* a pipeline worker: its release call will come */
     if (tl_work_arena_live || cbm_arena_capacity(from) > (size_t)CBM_WORK_ARENA_KEEP_BYTES) {
         cbm_arena_destroy(from);
         return;
@@ -2307,20 +2460,41 @@ void cbm_work_arena_give(CBMArena *from) {
 /* Public entry. Owns the traversal scratch arena for the whole of one file's
  * extraction: created here, handed to the body as ctx->scratch, destroyed on
  * the way out. The body has seven early returns, so bracketing it in a wrapper
- * is what keeps that to one create and one destroy. If the arena cannot be
- * created, the body is handed NULL and the traversal stacks fall back to the
- * result arena, which is what shipped before #1997. */
+ * is what keeps that to one create and one destroy. The arena is LAZY: it takes
+ * its first block when a traversal stack first needs one, so a file that builds
+ * no stack (most non-code files) costs nothing -- opened eagerly, 3.3 GB of
+ * 512 KB blocks were never read or written on the Go corpus (waste sanitizer,
+ * 2026-09-17). If the block cannot be allocated, the stack's allocation fails
+ * and it stops growing, exactly as on any later out-of-memory. */
 CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLanguage language,
                                    const char *project, const char *rel_path,
                                    int64_t timeout_micros, const char **extra_defines,
                                    const char **include_paths, const CBMMacroTable *macro_table,
                                    const CBMReturnTypeTable *return_type_table) {
     CBMArena scratch;
-    cbm_arena_init_sized(&scratch, CBM_EXTRACT_SCRATCH_BLOCK);
-    CBMFileResult *result = extract_file_ex_body(
-        source, source_len, language, project, rel_path, timeout_micros, extra_defines,
-        include_paths, macro_table, return_type_table, scratch.nblocks > 0 ? &scratch : NULL);
-    cbm_arena_destroy(&scratch);
+    if (tl_scratch_live) {
+        scratch = tl_scratch_arena;
+        tl_scratch_live = false;
+        cbm_arena_rewind(&scratch);
+    } else {
+        cbm_arena_init_lazy(&scratch, CBM_EXTRACT_SCRATCH_BLOCK);
+    }
+    CBMFileResult *result =
+        extract_file_ex_body(source, source_len, language, project, rel_path, timeout_micros,
+                             extra_defines, include_paths, macro_table, return_type_table, &scratch);
+    /* !tl_scratch_live: a nested extraction (an embedded language inside this
+     * file) may already have parked its own; never overwrite it. */
+    /* Kept up to CBM_EXTRACT_SCRATCH_KEEP_BYTES, grown blocks included: the
+     * definitions walk draws its frames from this arena too, so a file with
+     * many definitions grows it past the first block, and dropping every grown
+     * arena turned those files into fresh 512 KB blocks for the next file. */
+    if (tl_scratch_keep && !tl_scratch_live && scratch.nblocks > 0 &&
+        cbm_arena_capacity(&scratch) <= (size_t)CBM_EXTRACT_SCRATCH_KEEP_BYTES) {
+        tl_scratch_arena = scratch;
+        tl_scratch_live = true;
+    } else {
+        cbm_arena_destroy(&scratch);
+    }
     return result;
 }
 

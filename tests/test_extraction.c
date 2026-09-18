@@ -7291,11 +7291,15 @@ TEST(extract_compact_keeps_every_field_and_shrinks_the_arena) {
     ASSERT(shared);
 
     /* The arena stays usable for the cross-file pass: growth restarts at the
-     * default block, never at twice the compact block. */
+     * small append block, never at twice the compact block. (It restarted at
+     * the 64 KB default until 2026-09-17: the cross-file pass appends a few
+     * resolved calls, so that block was ~60 KB of untouched memory per
+     * appended-to result — 0.5 GB of the worker's peak on the Go corpus.
+     * See CBM_ARENA_APPEND_BLOCK.) */
     char *later = cbm_arena_strdup(&r->arena, "appended after compaction");
     ASSERT_NOT_NULL(later);
     ASSERT_EQ(r->arena.nblocks, 2);
-    ASSERT_EQ(r->arena.block_sizes[1], CBM_ARENA_DEFAULT_BLOCK_SIZE);
+    ASSERT_EQ(r->arena.block_sizes[1], CBM_ARENA_APPEND_BLOCK);
 
     cbm_free_result(r);
     cbm_free_result(ref);

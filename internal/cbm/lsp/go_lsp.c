@@ -1,9 +1,11 @@
 #include "go_lsp.h"
 #include "lsp_node_iter.h"
+#include "../../../src/foundation/hash_table.h"
 #include "../helpers.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 
 // Forward declarations
 static void resolve_calls_in_node_inner(GoLSPContext* ctx, TSNode node);
@@ -1836,14 +1838,17 @@ recurse:;
 
     // Recurse into children via a cursor (O(n)); ts_node_child(node,i) is O(i)
     // → O(n²) on a wide node.
+    // The cursor is this depth's pooled one (cbm_cursor_acquire): the recursion
+    // below runs one level deeper and never touches it.
     {
-        TSTreeCursor cursor = ts_tree_cursor_new(node);
-        if (ts_tree_cursor_goto_first_child(&cursor)) {
+        cbm_cursor_lease_t lease;
+        TSTreeCursor* cursor = cbm_cursor_acquire(&lease, ctx->walk_depth, node);
+        if (ts_tree_cursor_goto_first_child(cursor)) {
             do {
-                resolve_calls_in_node(ctx, ts_tree_cursor_current_node(&cursor));
-            } while (ts_tree_cursor_goto_next_sibling(&cursor));
+                resolve_calls_in_node(ctx, ts_tree_cursor_current_node(cursor));
+            } while (ts_tree_cursor_goto_next_sibling(cursor));
         }
-        ts_tree_cursor_delete(&cursor);
+        cbm_cursor_release(&lease);
     }
 
     if (push_scope) {
@@ -2059,6 +2064,60 @@ static const CBMType *cbm_go_lsp_parse_signature_param_text(CBMArena *arena, con
     return cbm_parse_return_type_text(arena, text, module_qn);
 }
 
+// --- Shared Go stdlib registry ---
+
+/* The Go stdlib (2,328 functions, 321 types) registered ONCE per process into
+ * a finalized, sealed registry that every per-file registry chains to as its
+ * fallback -- the overlay contract of type_registry.h: lookups and the chain
+ * iterators reach it, refinements copy into the head, nothing writes it.
+ * Registered into each file's registry instead, it was 13.4 k re-registrations
+ * on the Go corpus, 2.5 GB of copies, and every lookup of the unfinalized
+ * per-file registry scanned the stdlib linearly (waste sanitizer, 2026-09-17).
+ * Threads racing the first build each build a copy and the first to publish
+ * wins; the others free theirs -- no thread waits. NULL on allocation
+ * failure: the caller registers the stdlib into its own registry as before. */
+typedef struct {
+    CBMArena arena;
+    CBMTypeRegistry reg;
+} go_stdlib_holder_t;
+
+static _Atomic(go_stdlib_holder_t *) g_go_stdlib_shared;
+
+static const CBMTypeRegistry* go_stdlib_shared(void) {
+    go_stdlib_holder_t* ready = atomic_load_explicit(&g_go_stdlib_shared, memory_order_acquire);
+    if (ready) return &ready->reg;
+    go_stdlib_holder_t* built = (go_stdlib_holder_t*)calloc(1, sizeof(*built));
+    if (!built) return NULL;
+    cbm_arena_init(&built->arena);
+    if (built->arena.nblocks == 0) {
+        free(built);
+        return NULL;
+    }
+    cbm_registry_init(&built->reg, &built->arena);
+    cbm_go_stdlib_register(&built->reg, &built->arena);
+    cbm_registry_finalize(&built->reg);
+    built->reg.read_only = true;
+    go_stdlib_holder_t* expected = NULL;
+    if (atomic_compare_exchange_strong_explicit(&g_go_stdlib_shared, &expected, built,
+                                                memory_order_acq_rel, memory_order_acquire)) {
+        return &built->reg;
+    }
+    cbm_arena_destroy(&built->arena);
+    free(built);
+    return &expected->reg;
+}
+
+/* A per-file registry sees the stdlib: chained to the shared copy, or
+ * registered into it when the shared copy cannot be built. */
+static void go_registry_with_stdlib(CBMTypeRegistry* reg, CBMArena* arena) {
+    const CBMTypeRegistry* shared = go_stdlib_shared();
+    if (shared) {
+        reg->fallback = shared;
+    } else {
+        cbm_go_stdlib_register(reg, arena);
+    }
+}
+
 // --- Entry point: build registry from file defs + run LSP ---
 
 void cbm_run_go_lsp(CBMArena* arena, CBMFileResult* result,
@@ -2067,8 +2126,8 @@ void cbm_run_go_lsp(CBMArena* arena, CBMFileResult* result,
     CBMTypeRegistry reg;
     cbm_registry_init(&reg, arena);
 
-    // Register Go stdlib types/functions
-    cbm_go_stdlib_register(&reg, arena);
+    // Go stdlib types/functions: the shared sealed registry, chained
+    go_registry_with_stdlib(&reg, arena);
 
     const char* module_qn = result->module_qn;
 
@@ -2472,9 +2531,10 @@ static const char** split_pipe_strings(CBMArena* a, const char* text) {
 // Helper: parse "|"-separated "name:type" field definitions and populate a registered type.
 // Format: "Binder:Binder|Name:string|Count:int"
 // type_text is resolved relative to def_module_qn.
-static void parse_field_defs_into_type(CBMArena* arena, CBMTypeRegistry* reg,
-    const char* type_qn, const char* field_defs, const char* def_module_qn) {
-    if (!field_defs || !field_defs[0] || !type_qn) return;
+/* Parse "name:type|name:type" into NULL-terminated name/type arrays. False when
+ * nothing parsed (or on allocation failure): the type keeps no field info. */
+static bool parse_field_defs(CBMArena* arena, const char* field_defs, const char* def_module_qn,
+    const char*** names_out, const CBMType*** types_out) {
 
     // Count fields
     int count = 1;
@@ -2485,7 +2545,7 @@ static void parse_field_defs_into_type(CBMArena* arena, CBMTypeRegistry* reg,
 
     const char** names = (const char**)cbm_arena_alloc(arena, (count + 1) * sizeof(const char*));
     const CBMType** types = (const CBMType**)cbm_arena_alloc(arena, (count + 1) * sizeof(const CBMType*));
-    if (!names || !types) return;
+    if (!names || !types) return false;
 
     char* buf = cbm_arena_strdup(arena, field_defs);
     int idx = 0;
@@ -2511,8 +2571,17 @@ static void parse_field_defs_into_type(CBMArena* arena, CBMTypeRegistry* reg,
     }
     names[idx] = NULL;
     types[idx] = NULL;
+    *names_out = names;
+    *types_out = types;
+    return idx > 0;
+}
 
-    if (idx > 0) {
+static void parse_field_defs_into_type(CBMArena* arena, CBMTypeRegistry* reg,
+    const char* type_qn, const char* field_defs, const char* def_module_qn) {
+    if (!field_defs || !field_defs[0] || !type_qn) return;
+    const char** names = NULL;
+    const CBMType** types = NULL;
+    if (parse_field_defs(arena, field_defs, def_module_qn, &names, &types)) {
         // Find the registered type and update field info
         for (int ti = 0; ti < reg->type_count; ti++) {
             if (reg->types[ti].qualified_name &&
@@ -2964,10 +3033,10 @@ void cbm_run_go_lsp_cross(
     }
     TSNode root = ts_tree_root_node(tree);
 
-    // 2. Build registry
+    // 2. Build registry (the stdlib is the shared sealed registry, chained)
     CBMTypeRegistry reg;
     cbm_registry_init(&reg, arena);
-    cbm_go_stdlib_register(&reg, arena);
+    go_registry_with_stdlib(&reg, arena);
 
     // Register all defs (file-local + cross-file).
     // Perf: borrow strings from defs[] directly — they live in the
@@ -3227,6 +3296,27 @@ CBMTypeRegistry* cbm_go_build_cross_registry(
     cbm_registry_init(reg, arena);
     cbm_go_stdlib_register(reg, arena);
 
+    /* Qualified name -> FIRST type index while the registry is built: it is
+     * not finalized until the end, so its own lookup scans every type, and the
+     * receiver check below plus the field-definition lookup made the build
+     * O(types x (methods + structs)) -- 4.4 s single-threaded on the Go corpus,
+     * the scaling lane's parse_field_defs_into_type x2.9 (waste sanitizer,
+     * 2026-09-17). First-match semantics are kept exactly: a receiver's
+     * placeholder type added before its struct still receives the fields.
+     * NULL on allocation failure: the linear paths below run as before. */
+    CBMHashTable* first_type = cbm_ht_create((uint32_t)(def_count / 4 + 1024));
+    int noted_types = 0;
+#define GO_NOTE_NEW_TYPES()                                                              \
+    do {                                                                                 \
+        for (; first_type && noted_types < reg->type_count; noted_types++) {             \
+            const char* tqn = reg->types[noted_types].qualified_name;                    \
+            if (tqn && !cbm_ht_has(first_type, tqn)) {                                   \
+                cbm_ht_set(first_type, tqn, (void*)(uintptr_t)(noted_types + 1));        \
+            }                                                                            \
+        }                                                                                \
+    } while (0)
+    GO_NOTE_NEW_TYPES();
+
     for (int i = 0; i < def_count; i++) {
         CBMLSPDef* d = &defs[i];
         if (!d->qualified_name || !d->short_name || !d->label) continue;
@@ -3250,9 +3340,20 @@ CBMTypeRegistry* cbm_go_build_cross_registry(
                 rt.method_names = split_pipe_strings(arena, d->method_names_str);
             }
             cbm_registry_add_type(reg, rt);
+            GO_NOTE_NEW_TYPES();
             if (d->field_defs && d->field_defs[0]) {
-                parse_field_defs_into_type(arena, reg, rt.qualified_name,
-                                           d->field_defs, def_mod);
+                if (first_type) {
+                    const char** names = NULL;
+                    const CBMType** types = NULL;
+                    uintptr_t at = (uintptr_t)cbm_ht_get(first_type, rt.qualified_name);
+                    if (parse_field_defs(arena, d->field_defs, def_mod, &names, &types) && at) {
+                        reg->types[at - 1].field_names = names;
+                        reg->types[at - 1].field_types = types;
+                    }
+                } else {
+                    parse_field_defs_into_type(arena, reg, rt.qualified_name,
+                                               d->field_defs, def_mod);
+                }
             }
         }
 
@@ -3269,18 +3370,23 @@ CBMTypeRegistry* cbm_go_build_cross_registry(
             rf.signature = cbm_type_func(arena, NULL, param_types, ret_types);
             if (strcmp(d->label, "Method") == 0 && d->receiver_type && d->receiver_type[0]) {
                 rf.receiver_type = d->receiver_type;
-                if (!cbm_registry_lookup_type(reg, rf.receiver_type)) {
+                bool known = first_type ? cbm_ht_has(first_type, rf.receiver_type)
+                                        : cbm_registry_lookup_type(reg, rf.receiver_type) != NULL;
+                if (!known) {
                     CBMRegisteredType auto_type;
                     memset(&auto_type, 0, sizeof(auto_type));
                     auto_type.qualified_name = rf.receiver_type;
                     const char* dot = strrchr(d->receiver_type, '.');
                     auto_type.short_name = dot ? dot + 1 : rf.receiver_type;
                     cbm_registry_add_type(reg, auto_type);
+                    GO_NOTE_NEW_TYPES();
                 }
             }
             cbm_registry_add_func(reg, rf);
         }
     }
+#undef GO_NOTE_NEW_TYPES
+    cbm_ht_free(first_type);
 
     cbm_registry_finalize(reg);
     reg->read_only = true; /* seal: shared Tier-2 registry is read-only during resolve */
