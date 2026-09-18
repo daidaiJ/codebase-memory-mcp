@@ -478,6 +478,33 @@ TEST(resolve_budget_no_override_uses_fraction) {
     PASS();
 }
 
+/* A budget derived from TOTAL ram plans to use memory that may already belong
+ * to another process. Measured 2026-09-18 on a 48 GB host: the 24 GB default
+ * was sized while a 12 GiB VM ran, the kernel index took its full 24.5 GB, and
+ * the machine ran out — the same run completed once the VM was stopped. */
+TEST(clamp_to_available_leaves_headroom_for_the_rest_of_the_machine) {
+    size_t budget = 24576 * CBM_TEST_MB; /* 24 GB, the 50%-of-48 GB default */
+
+    /* Plenty free: the fraction-derived budget stands. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(budget, 40960 * CBM_TEST_MB), budget);
+
+    /* Only 8 GB free: headroom is a quarter of it, so the budget becomes 6 GB
+     * instead of planning to use three times what the machine has. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(budget, 8192 * CBM_TEST_MB), 6144 * CBM_TEST_MB);
+
+    /* Headroom is capped so a big machine does not behave like a small one:
+     * 64 GB free reserves 8 GB, not 16 GB, and 24 GB still fits under that. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(budget, 65536 * CBM_TEST_MB), budget);
+
+    /* Nearly nothing free: clamped to the floor rather than to zero — refusing
+     * to index at all is worse than trying and spilling. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(budget, 256 * CBM_TEST_MB), 512 * CBM_TEST_MB);
+
+    /* The platform could not answer: the ceiling stands, no guessing. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(budget, 0), budget);
+    PASS();
+}
+
 TEST(resolve_budget_invalid_fraction_defaults) {
     /* Out-of-range fractions fall back to the 0.5 default. */
     size_t total = 8192 * CBM_TEST_MB;
@@ -1349,7 +1376,7 @@ static TSTree *parse_for_test(TSParser *parser, CBMLanguage lang, const char *sr
  * name in another grammar. The real function is reached with parentheses, which
  * suppress the macro. */
 TEST(field_id_cache_answers_exactly_what_tree_sitter_answers) {
-    static const char *const names[] = {"name",   "body",   "type",  "parameters",
+    static const char *const names[] = {"name",   "body",     "type",  "parameters",
                                         "result", "receiver", "value", "not_a_field"};
     const char *go_src = "package p\n"
                          "type T struct { A int }\n"
@@ -1417,8 +1444,8 @@ TEST(field_id_cache_answers_exactly_what_tree_sitter_answers) {
 TEST(cursor_pool_hands_each_depth_its_own_cursor) {
     TSParser *parser = ts_parser_new();
     ASSERT_NOT_NULL(parser);
-    TSTree *tree = parse_for_test(parser, CBM_LANG_GO,
-                                  "package p\nfunc A() {}\nfunc B() {}\nvar C = 1\n");
+    TSTree *tree =
+        parse_for_test(parser, CBM_LANG_GO, "package p\nfunc A() {}\nfunc B() {}\nvar C = 1\n");
     ASSERT_NOT_NULL(tree);
     TSNode root = ts_tree_root_node(tree);
 
@@ -1439,7 +1466,8 @@ TEST(cursor_pool_hands_each_depth_its_own_cursor) {
     bool fresh_ok = ts_tree_cursor_goto_first_child(&fresh);
     int siblings = 0;
     while (pooled_ok && fresh_ok) {
-        ASSERT_TRUE(ts_node_eq(ts_tree_cursor_current_node(c0), ts_tree_cursor_current_node(&fresh)));
+        ASSERT_TRUE(
+            ts_node_eq(ts_tree_cursor_current_node(c0), ts_tree_cursor_current_node(&fresh)));
         siblings++;
         pooled_ok = ts_tree_cursor_goto_next_sibling(c0);
         fresh_ok = ts_tree_cursor_goto_next_sibling(&fresh);
@@ -1727,6 +1755,7 @@ SUITE(mem) {
     RUN_TEST(mem_init_second_call_noop);
     /* CBM_MEM_BUDGET_MB budget override */
     RUN_TEST(resolve_budget_no_override_uses_fraction);
+    RUN_TEST(clamp_to_available_leaves_headroom_for_the_rest_of_the_machine);
     RUN_TEST(resolve_budget_invalid_fraction_defaults);
     RUN_TEST(resolve_budget_override_wins);
     RUN_TEST(resolve_budget_override_clamped_to_total);

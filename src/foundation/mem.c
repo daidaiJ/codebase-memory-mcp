@@ -188,6 +188,11 @@ static void mem_option_set_verified(mi_option_t option, long value, const char *
 #define RAM_FRACTION_32GB 0.35
 #define RAM_BYTES_PER_GB (1024ULL * 1024 * 1024)
 
+/* Bounds for the free-memory clamp (cbm_mem_clamp_to_available). */
+#define CBM_MEM_AVAIL_HEADROOM_MIN ((size_t)RAM_BYTES_PER_GB)
+#define CBM_MEM_AVAIL_HEADROOM_MAX ((size_t)(8ULL * RAM_BYTES_PER_GB))
+#define CBM_MEM_BUDGET_FLOOR ((size_t)(RAM_BYTES_PER_GB / 2)) /* 512 MB */
+
 double cbm_mem_ram_fraction_for_total(size_t total_ram_bytes) {
     if (total_ram_bytes <= 16ULL * RAM_BYTES_PER_GB) {
         return RAM_FRACTION_16GB;
@@ -246,6 +251,36 @@ cbm_mem_budget_t cbm_mem_resolve_budget(size_t total_ram, double ram_fraction,
         result.budget = want * MB_DIVISOR;
     }
     return result;
+}
+
+/* A budget derived from TOTAL ram plans to use memory that may already belong
+ * to something else. Measured 2026-09-18 on a 48 GB host: the default budget
+ * (50% = 24 GB) was sized while a 12 GiB VM and a second VM were running, the
+ * kernel index took its full 24.5 GB RSS, and the machine ran out — the same
+ * run completed at the same budget once the VM was stopped. Total RAM is the
+ * CEILING; what is free right now is the CONSTRAINT.
+ *
+ * Headroom is a quarter of what is free, held between 1 and 8 GB: enough that
+ * the OS, its file cache and the user's editor are not squeezed out, without
+ * making a large-memory machine behave like a small one. A budget is never
+ * clamped below CBM_MEM_BUDGET_FLOOR — below that nothing indexes at all, and
+ * refusing to start is worse than trying and spilling. available == 0 means
+ * the platform could not answer, and a guess is not better than the ceiling. */
+size_t cbm_mem_clamp_to_available(size_t budget, size_t available) {
+    if (available == 0) {
+        return budget;
+    }
+    size_t headroom = available / 4;
+    if (headroom < CBM_MEM_AVAIL_HEADROOM_MIN) {
+        headroom = CBM_MEM_AVAIL_HEADROOM_MIN;
+    } else if (headroom > CBM_MEM_AVAIL_HEADROOM_MAX) {
+        headroom = CBM_MEM_AVAIL_HEADROOM_MAX;
+    }
+    size_t cap = available > headroom ? available - headroom : 0;
+    if (cap < CBM_MEM_BUDGET_FLOOR) {
+        cap = CBM_MEM_BUDGET_FLOOR;
+    }
+    return budget < cap ? budget : cap;
 }
 
 cbm_mem_budget_t cbm_mem_resolve_budget_capped(size_t total_ram, double ram_fraction,
@@ -418,6 +453,38 @@ void cbm_mem_init_with_cap(double ram_fraction, size_t hard_cap_bytes) {
     const char *env = cbm_safe_getenv("CBM_MEM_BUDGET_MB", env_buf, sizeof(env_buf), NULL);
     cbm_mem_budget_t resolved =
         cbm_mem_resolve_budget_capped(info.total_ram, ram_fraction, env, hard_cap_bytes);
+
+    /* A budget derived from total RAM is a plan made in ignorance of what the
+     * machine is already doing. Clamp the DERIVED budget to what is actually
+     * free; an explicit CBM_MEM_BUDGET_MB is the user's deliberate choice and
+     * still wins, but it is warned about when it exceeds what is free, because
+     * the failure it buys (the OS killing the worker) reads like a product bug
+     * rather than a setting. */
+    size_t available = cbm_system_available_ram();
+    bool explicit_budget =
+        resolved.source != NULL && strcmp(resolved.source, "CBM_MEM_BUDGET_MB") == 0;
+    if (!explicit_budget) {
+        size_t clamped = cbm_mem_clamp_to_available(resolved.budget, available);
+        if (clamped < resolved.budget) {
+            char want_mb[CBM_SZ_32];
+            char avail_mb[CBM_SZ_32];
+            snprintf(want_mb, sizeof(want_mb), "%zu", resolved.budget / MB_DIVISOR);
+            snprintf(avail_mb, sizeof(avail_mb), "%zu", available / MB_DIVISOR);
+            cbm_log_info("mem.budget.available_clamp", "from_mb", want_mb, "available_mb", avail_mb,
+                         "detail", "budget reduced to fit memory that is actually free");
+            resolved.budget = clamped;
+            resolved.source = "available_ram";
+        }
+    } else if (available > 0 && resolved.budget > available) {
+        char want_mb[CBM_SZ_32];
+        char avail_mb[CBM_SZ_32];
+        snprintf(want_mb, sizeof(want_mb), "%zu", resolved.budget / MB_DIVISOR);
+        snprintf(avail_mb, sizeof(avail_mb), "%zu", available / MB_DIVISOR);
+        cbm_log_warn("mem.budget.over_available", "budget_mb", want_mb, "available_mb", avail_mb,
+                     "detail",
+                     "explicit budget exceeds free memory: the OS may kill this process before "
+                     "the budget is ever reached");
+    }
     g_budget = resolved.budget;
 
     /* The resolver is the single source of truth for the parse + clamp; this
@@ -572,6 +639,24 @@ bool cbm_mem_over_budget(void) {
     size_t charged = cbm_mem_charged();
     check_pressure(charged);
     return charged > g_budget;
+}
+
+/* "Give memory back now" — true when our own budget is exceeded OR the MACHINE
+ * is short, whichever comes first.
+ *
+ * Deliberately separate from cbm_mem_over_budget(): the budget decides whether
+ * the run may CONTINUE (and, as a last resort, aborts it), while this decides
+ * whether to spill and reclaim. System pressure must never abort a run — it is
+ * someone else's allocation spike as often as ours, and the honest response is
+ * to hand memory back, not to fail. Keeping the two apart is what lets the
+ * relief path be aggressive without making the failure path trigger-happy.
+ *
+ * Why it is needed at all: the budget is charged against OUR accounting, which
+ * on 2026-09-18 read 22 GB against a 24 GB budget while the host had nothing
+ * left and killed the worker. Our own number can be comfortably under budget
+ * while the machine is dying. */
+bool cbm_mem_should_relieve(void) {
+    return cbm_mem_over_budget() || cbm_mem_system_under_pressure();
 }
 
 /* Reclaimable memory below this share of total RAM is where paging starts to
