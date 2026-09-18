@@ -1020,6 +1020,20 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
                     pp_spill_enter(ec, "near_budget");
                 }
             }
+            /* The MACHINE can be out of memory while our own charge sits well
+             * under the budget: measured 2026-09-18 on a 48 GB host, 22 GB
+             * charged against a 24 GB budget, and the OS killed the worker
+             * anyway because a VM held the rest. Spill on real scarcity too.
+             * RELIEF ONLY — `over` is deliberately NOT set from this, so the
+             * futility/abort path below stays keyed to OUR budget. Another
+             * process's allocation spike must never fail this run.
+             * The cheap charge comparison guards the syscall, so the pressure
+             * query costs nothing until we are already in the danger zone. */
+            if (!pp_spill_active(ec) && cbm_mem_charged() > cbm_mem_budget() / 2 &&
+                cbm_mem_system_under_pressure()) {
+                pp_spill_enter(ec, "system_pressure");
+                (void)pp_spill_sweep(ec, worker_id);
+            }
             bool settling = false;
             if (over) {
                 /* Admission control, first response: park what can be parked.
@@ -1652,8 +1666,23 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             rels[i] = files[i].rel_path;
         }
     }
-    CBMHashTable *namespace_map =
-        cbm_pipeline_namespace_map_build(ctx->project_name, result_cache, rels, file_count);
+    /* Built from every file, including the ones already parked on disk: their
+     * results are NULL in result_cache, and a file absent from this map does
+     * not fail to resolve, it resolves through the looser fallback. Spilling
+     * therefore used to CHANGE the graph rather than merely delay it -- php
+     * measured 57,182 edges in memory against 59,379 while spilling, the same
+     * binary and corpus (2026-09-18), differing in both directions. */
+    const char **namespaces = cbm_calloc(CBM_MEM_CLASS_OTHER, (size_t)file_count * sizeof(char *));
+    CBMHashTable *namespace_map = NULL;
+    if (namespaces) {
+        for (int i = 0; i < file_count; i++) {
+            namespaces[i] = result_cache[i] ? result_cache[i]->namespace_name
+                                            : cbm_result_spill_namespace(ctx->spill, i);
+        }
+        namespace_map =
+            cbm_pipeline_namespace_map_build_names(ctx->project_name, namespaces, rels, file_count);
+        cbm_free(CBM_MEM_CLASS_OTHER, namespaces);
+    }
     free(rels);
 
     for (int i = 0; i < file_count; i++) {
