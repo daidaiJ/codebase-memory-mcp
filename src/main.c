@@ -71,6 +71,7 @@ enum {
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"
 #include "foundation/mem.h"
+#include "foundation/mem_events.h"
 #include "foundation/profile.h"
 #include "foundation/sha256.h"
 #include "foundation/secure_random.h"
@@ -858,6 +859,7 @@ static int run_cli(int argc, char **argv, cbm_project_lock_manager_t *project_lo
         /* The graph lives on this process's heaps: SQLite gets heaps of its
          * own here, and only here (cbm_sqlite_dedicated_heap). */
         cbm_sqlite_dedicated_heap(true);
+        cbm_memev_process_role("worker");
     }
     cbm_index_set_worker_role_options(index_worker, response_out, worker_single_thread,
                                       worker_marker, worker_quarantine,
@@ -1024,6 +1026,12 @@ static int run_cli(int argc, char **argv, cbm_project_lock_manager_t *project_lo
         /* Supervised worker: hand the full result string to the parent via the
          * response file before printing (parent reads it back on a clean exit). */
         const char *ro = cbm_index_worker_response_out();
+        if (cbm_index_worker_active()) {
+            /* Waste dump + execution counts BEFORE the response: the parent may
+             * end the worker as soon as the response file is complete, and the
+             * fast exit below skips every at-exit writer anyway. */
+            cbm_memev_process_exit();
+        }
         bool worker_response_written = false;
         if (ro) {
             FILE *rf = cbm_fopen(ro, "wb");
