@@ -861,7 +861,24 @@ test-foundation: $(BUILD_DIR)/test-foundation
 
 # ── Grammar/TS/LSP object files (compiled with relaxed warnings) ─
 
-$(BUILD_DIR)/%.o: $(CBM_DIR)/%.c | $(BUILD_DIR)
+# Each grammar_<lang>.c is a unity object that #includes its own vendored
+# parser.c and, where the grammar has one, scanner.c. Those includes were
+# prerequisites of nothing, so editing a vendored scanner left the object
+# untouched and the edit silently absent from the binary: on 2026-09-19 a fix
+# to properties/scanner.c appeared not to work at all, and `nm` showed the old
+# symbol still sitting in prod_grammar_properties.o. MANIFEST.md's "Local
+# source patches" table means patching a vendored scanner is expected, so this
+# trap is reachable by design. Same reasoning as LSP_UNITY_DEPS and
+# TS_RUNTIME_DEPS above; secondary expansion is what lets one pattern rule name
+# each grammar's own directory ($$* is the stem, grammar_properties ->
+# properties). Non-grammar objects match no directory and gain no prerequisite.
+GRAMMAR_VENDOR_DIR = $(CBM_DIR)/vendored/grammars/$$(subst grammar_,,$$*)
+GRAMMAR_UNITY_DEPS = $$(wildcard $(GRAMMAR_VENDOR_DIR)/*.c) \
+                     $$(wildcard $(GRAMMAR_VENDOR_DIR)/*.h) \
+                     $$(wildcard $(GRAMMAR_VENDOR_DIR)/tree_sitter/*.h)
+.SECONDEXPANSION:
+
+$(BUILD_DIR)/%.o: $(CBM_DIR)/%.c $(GRAMMAR_UNITY_DEPS) | $(BUILD_DIR)
 	$(CC) $(GRAMMAR_CFLAGS_TEST) -c -o $@ $<
 
 $(BUILD_DIR)/ts_runtime.o: $(TS_RUNTIME_DEPS) | $(BUILD_DIR)
@@ -873,7 +890,7 @@ $(BUILD_DIR)/lsp_all.o: $(LSP_UNITY_DEPS) | $(BUILD_DIR)
 $(BUILD_DIR)/preprocessor.o: $(CBM_DIR)/preprocessor.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS_TEST) -w -I$(CBM_DIR)/vendored -c -o $@ $<
 
-$(BUILD_DIR)/tsan_%.o: $(CBM_DIR)/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/tsan_%.o: $(CBM_DIR)/%.c $(GRAMMAR_UNITY_DEPS) | $(BUILD_DIR)
 	$(CC) $(GRAMMAR_CFLAGS_TSAN) -c -o $@ $<
 
 $(BUILD_DIR)/tsan_ts_runtime.o: $(TS_RUNTIME_DEPS) | $(BUILD_DIR)
@@ -1103,7 +1120,7 @@ TS_RUNTIME_OBJ_PROD = $(BUILD_DIR)/prod_ts_runtime.o
 LSP_OBJ_PROD = $(BUILD_DIR)/prod_lsp_all.o
 PP_OBJ_PROD = $(BUILD_DIR)/prod_preprocessor.o
 
-$(BUILD_DIR)/prod_%.o: $(CBM_DIR)/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/prod_%.o: $(CBM_DIR)/%.c $(GRAMMAR_UNITY_DEPS) | $(BUILD_DIR)
 	$(CC) $(GRAMMAR_CFLAGS) -c -o $@ $<
 
 $(BUILD_DIR)/prod_ts_runtime.o: $(TS_RUNTIME_DEPS) | $(BUILD_DIR)
