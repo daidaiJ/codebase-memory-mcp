@@ -278,6 +278,14 @@ bash "$ROOT/tests/test_language_count_contract.sh"
 echo "=== Step 0x: packaging version-metadata contract ==="
 bash "$ROOT/tests/test_version_metadata_contract.sh"
 
+# Step 0y: the Windows leg must not decide its verdict from an exit status that
+# the ssh/msys2_shell chain can mangle — a channel that turns 0 into 1 can turn
+# 1 into 0, and that direction reports a RED Windows leg as green. Runs
+# everywhere (it drives synthetic logs, no VM needed) because the guard it pins
+# is what every Windows verdict rests on.
+echo "=== Step 0y: VM leg verdict contract ==="
+bash "$ROOT/tests/test_vm_verdict_contract.sh"
+
 # Verify compiler supports target arch
 verify_compiler "$CC"
 
