@@ -225,17 +225,56 @@ static const char *cbm_string_read(void *payload, uint32_t byte, TSPoint point,
  * edge). A generous WALL ceiling stays as a backstop so a genuinely
  * stuck/spinning parse still terminates in bounded time. */
 #define CBM_PARSE_WALL_CEILING_FACTOR 12ULL /* ~60 s ceiling for the 5 s CPU budget */
-/* A parse that used more than 1/N of the per-file budget disqualifies the file
- * from the unbudgeted LSP walks (see cbm_extract_file_ex). */
-#define CBM_LSP_BUDGET_SHARE_DIV 2ULL
-/* The unified walk may spend this many parse budgets of thread CPU time: wide
- * enough for a 7,873-definition reference file (~10 s), tight enough to stop the
- * generated JIT tests (65-350 s). */
-#define CBM_WALK_BUDGET_FACTOR 6ULL
+/* The unified walk has NO budget: it walks every node of every file.
+ *
+ * It used to stop on a thread-CPU deadline, which made the GRAPH a function of
+ * how fast the machine happened to be running. Two indexes of the same C#
+ * corpus, same machine, minutes apart, stopped the walk of
+ * src/tests/JIT/jit64/opt/cse/hugeSimpleExpr1.cs at node 2,660,352 and at node
+ * 2,574,336 (measured 2026-09-19). That file's tail is all field assignments,
+ * so the two runs disagreed by 10 WRITES edges: a graph that differed run to
+ * run for a reason no user could see or reproduce. A budget in NODES would at
+ * least have been reproducible, but it still answers "what is in this repo?"
+ * with "depends how much we felt like reading" — so there is no budget at all.
+ * Everything the walk does is a pure function of the tree, and now so is when
+ * it stops: at the end.
+ *
+ * What the deadline was protecting against is real and is handled where it
+ * belongs — in the cost per node, not in a clock. Generated blobs (2.7-8.2 M
+ * node trees) used to cost 18-48 us per node because usage stamping called
+ * ts_node_parent, which descends from the root; the walk now carries its own
+ * parent chain, so a deep tree costs what a shallow one does.
+ *
+ * CBM_WALK_MAX_NODES reinstates a budget for an operator who needs one
+ * (0 = the default, no budget). */
+#define CBM_WALK_MAX_NODES_DEFAULT 0u
+
+/* Read fresh each call, like cbm_max_file_bytes: cheap next to a file walk, and
+ * no memoized copy to go stale between runs in the same process. */
+static uint32_t cbm_walk_max_nodes(void) {
+    const char *raw = getenv("CBM_WALK_MAX_NODES");
+    if (raw && raw[0]) {
+        errno = 0;
+        char *end = NULL;
+        unsigned long v = strtoul(raw, &end, 10);
+        if (errno == 0 && end != raw && *end == '\0' && v <= UINT32_MAX) {
+            return (uint32_t)v; /* 0 is a legitimate choice: no budget */
+        }
+        /* Unparseable / out-of-range → the default, never an accidental 0. */
+    }
+    return CBM_WALK_MAX_NODES_DEFAULT;
+}
 
 typedef struct {
     uint64_t cpu_deadline_ns; // trip once this thread's CPU time passes it
     uint64_t wall_ceiling_ns; // hard wall backstop for a spinning/stuck parse
+    /* Set by the callback when IT ended the parse. ts_parser_parse_with_options
+     * returns NULL for several reasons and the budget is only one of them, but
+     * the failure used to be reported as "parse timeout" whenever a budget was
+     * configured at all. A 7-line .properties file was accused of timing out
+     * (2026-09-19); whatever really happened to it, saying "timeout" sent the
+     * next reader looking at the clock. */
+    bool tripped;
 } CBMParseBudget;
 
 #ifdef CBM_ENABLE_TEST_SEAMS
@@ -253,12 +292,17 @@ static CBM_TLS uint64_t tl_parse_wall_seam_offset_ns = 0;
  * parameter here would not match the opts.progress_callback assignment below. */
 // cppcheck-suppress constParameterCallback
 static bool cbm_timeout_cb(TSParseState *state) {
-    const CBMParseBudget *budget = (const CBMParseBudget *)state->payload;
+    CBMParseBudget *budget = (CBMParseBudget *)state->payload;
     uint64_t wall = now_ns();
 #ifdef CBM_ENABLE_TEST_SEAMS
     wall += tl_parse_wall_seam_offset_ns;
 #endif
-    return cbm_thread_cpu_time_ns() > budget->cpu_deadline_ns || wall > budget->wall_ceiling_ns;
+    bool over =
+        cbm_thread_cpu_time_ns() > budget->cpu_deadline_ns || wall > budget->wall_ceiling_ns;
+    if (over) {
+        budget->tripped = true; /* so a NULL tree can name its real cause */
+    }
+    return over;
 }
 
 // --- Thread-local parser pool ---
@@ -1882,7 +1926,6 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
     ts_parser_reset(parser);
 
     uint64_t t0 = now_ns();
-    uint64_t cpu_start_ns = cbm_thread_cpu_time_ns();
 
     // Build string input + timeout options for parse_with_options
     CBMStringInput str_input = {source, (uint32_t)source_len};
@@ -1922,40 +1965,47 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
 
     if (!tree) {
         result->has_error = true;
-        result->error_msg =
-            cbm_arena_strdup(a, timeout_micros > 0 ? "parse timeout" : "parse failed");
+        /* Only the budget's own callback may call this a timeout. Any other
+         * NULL is a parse failure, and saying so is the difference between a
+         * reader chasing the clock and a reader chasing the real cause. */
+        result->error_msg = cbm_arena_strdup(a, budget.tripped ? "parse timeout" : "parse failed");
         cbm_index_mark_done(rel_path);
         return result;
     }
 
     TSNode root = ts_tree_root_node(tree);
 
-    /* Parse-budget share. A file whose parse alone consumed more than
-     * 1/CBM_LSP_BUDGET_SHARE_DIV of its budget is too large for the per-file
-     * LSP walk that follows: the walk is superlinear in expression size and
-     * has no budget of its own (C#, a 23 MB single-expression JIT test: 354 s
-     * in the walk, then a crash in the cross-file resolve on the same tree,
-     * 2026-09-14 -- the parse used to time out at 5 s and hide both). The
-     * unified extractor's defs stay; the LSP refinement here and the
-     * cross-file resolve (cbm_pxc_dispatch_file) skip the file, logged. The
-     * budget is the same for every parser, so the rule is too. */
-    bool lsp_skipped = timeout_micros > 0 && (t1 - t0) * CBM_LSP_BUDGET_SHARE_DIV > budget_ns;
+    /* No file is disqualified from the LSP walks by how long its parse took.
+     *
+     * The rule used to be "a parse that spent more than half its budget means
+     * this tree is too heavy for the walks" — a clock deciding which files get
+     * type-aware refinement, so the same repo could come back with different
+     * graphs. It was added on 2026-09-14 against a 23 MB single-expression C#
+     * JIT test that cost 354 s in the per-file walk and then crashed the
+     * cross-file resolve.
+     *
+     * Removing it was checked against exactly that file and that path
+     * (2026-09-19): the whole 12k-file C# corpus twice, cross-file resolve
+     * included, and hugeexpr1.cs on its own — no crash, same 1,224,981 nodes /
+     * 5,794,873 edges as with the rule in place, same ~100 s. Synthetic C# with
+     * valid nesting 10,000 levels deep indexes fine; past roughly that depth
+     * tree-sitter itself stops producing a usable tree, so a tree deep enough
+     * to endanger a recursive walk never reaches one. The 354 s is gone for a
+     * different reason: the walk that spent it was C#'s own, climbing with
+     * ts_node_parent, and it now uses the cursor (extract_usages.c).
+     *
+     * CBM_TEST_LSP_SKIP_ON still names a file for the tests that pin the
+     * skipped-file behaviour itself. */
 #ifdef CBM_ENABLE_TEST_SEAMS
     {
         const char *skip_on = getenv("CBM_TEST_LSP_SKIP_ON");
         if (skip_on && skip_on[0] && rel_path && strstr(rel_path, skip_on)) {
-            lsp_skipped = true; /* the test names the file; no real timing involved */
+            result->lsp_skipped = true; /* the test names the file; no timing involved */
+            cbm_log_warn("extract.lsp.skipped", "reason", "test_seam", "path",
+                         rel_path ? rel_path : "");
         }
     }
 #endif
-    if (lsp_skipped) {
-        char parse_ms[CBM_SZ_32];
-        snprintf(parse_ms, sizeof(parse_ms), "%llu",
-                 (unsigned long long)((t1 - t0) / CBM_NSEC_PER_MSEC));
-        cbm_log_warn("extract.lsp.skipped", "reason", "parse_budget", "parse_ms", parse_ms, "path",
-                     rel_path ? rel_path : "");
-        result->lsp_skipped = true;
-    }
 
     // Compute module QN. Java/Go derive the module from the CONTAINING
     // DIRECTORY (package semantics) rather than baking the filename stem in,
@@ -1979,8 +2029,7 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
         .root = root,
         .macro_table = macro_table,
         .return_type_table = return_type_table,
-        .walk_deadline_cpu_ns =
-            timeout_micros > 0 ? cbm_thread_cpu_time_ns() + budget_ns * CBM_WALK_BUDGET_FACTOR : 0,
+        .walk_budget_nodes = cbm_walk_max_nodes(),
     };
 
     // Run extractors: defs + imports use separate walks (unique recursion patterns),
@@ -1988,19 +2037,12 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
     cbm_extract_definitions(&ctx);
     cbm_extract_imports(&ctx);
     cbm_extract_unified(&ctx);
+    result->tree_nodes = ts_node_descendant_count(root);
+    result->walk_nodes_visited = ctx.walk_nodes_visited;
     if (ctx.walk_budget_exhausted) {
         result->walk_truncated = true;
         result->lsp_skipped = true;
-        cbm_log_warn("extract.walk.truncated", "reason", "cpu_budget", "path",
-                     rel_path ? rel_path : "");
-    }
-    /* A file that spent the budget on parse plus walk is too heavy for the
-     * unbudgeted LSP walks as well (the C# JIT test files: 65-73 s each in
-     * the per-file walk after a parse under the share rule). */
-    if (!result->lsp_skipped && timeout_micros > 0 &&
-        cbm_thread_cpu_time_ns() - cpu_start_ns > budget_ns) {
-        result->lsp_skipped = true;
-        cbm_log_warn("extract.lsp.skipped", "reason", "file_budget", "path",
+        cbm_log_warn("extract.walk.truncated", "reason", "node_budget", "path",
                      rel_path ? rel_path : "");
     }
 

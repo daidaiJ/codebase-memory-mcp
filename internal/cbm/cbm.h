@@ -569,6 +569,12 @@ typedef struct CBMFileResult {
      * to that point are kept, the rest of the file is not walked. Implies
      * lsp_skipped. */
     bool walk_truncated;
+    /* Size of this file's parse tree, and how much of it the unified walk got
+     * through. Reported for a truncated or LSP-skipped file so the coverage
+     * report says how much of it is missing, instead of leaving the gap
+     * silent. */
+    uint32_t tree_nodes;
+    uint32_t walk_nodes_visited;
     CBMLanguage cached_lang; // language of cached tree (for parser selection)
 
     // Retained source bytes — copied into `arena` by the parallel
@@ -659,14 +665,19 @@ typedef struct {
      * class-body variable def records which class declares it (parent_class)
      * without changing its module-level qualified name. NULL elsewhere. */
     const char *var_parent_class;
-    /* Per-file walk budget (thread CPU time, ns; 0 = unbounded). The unified
-     * cursor walk checks it every 1024 nodes and stops when it is spent, so
-     * no single file can hold a worker for minutes: a 23 MB single-expression
-     * C# test file cost 346 s in usage stamping alone (tree-sitter's
-     * ts_node_parent descends from the root, quadratic on a deep tree;
-     * 2026-09-14). What was extracted before the stop is kept. */
-    uint64_t walk_deadline_cpu_ns;
+    /* Per-file walk budget in VISITED NODES (0 = unbounded). The unified cursor
+     * walk stops once it is spent, so no single file can hold a worker for
+     * minutes: a 23 MB single-expression C# test file cost 346 s in usage
+     * stamping alone (tree-sitter's ts_node_parent descends from the root,
+     * quadratic on a deep tree; 2026-09-14). What was extracted before the stop
+     * is kept, and the file is named in the coverage report. Counted in nodes
+     * rather than CPU time so that the same file always stops at the same node
+     * — see CBM_WALK_MAX_NODES_DEFAULT for what a clock did here. */
+    uint32_t walk_budget_nodes;
     bool walk_budget_exhausted;
+    /* How many nodes the unified walk actually visited (whether or not it ran
+     * out of budget) — the measurement the budget has to be expressed in. */
+    uint32_t walk_nodes_visited;
 } CBMExtractCtx;
 
 // --- Public API ---

@@ -1188,6 +1188,28 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
             pp_err_add(errs, fi->rel_path, result->error_ranges ? result->error_ranges : "unknown",
                        result->parse_unusable ? "parse_unusable" : "parse_partial");
         }
+        /* A truncated walk is a coverage gap like a partial parse, and until now
+         * it was the only one we kept to ourselves: result->walk_truncated was
+         * set and never read by anything, so a file the walk abandoned halfway
+         * was reported as fully indexed. Say how far it got — "walked 812k of
+         * 3.4M nodes" is the difference between a graph with a known hole and a
+         * graph that quietly lies about its coverage. Independent of the
+         * branches above: a truncated walk is not a parse error. */
+        if (result->walk_truncated) {
+            char how_far[CBM_SZ_64];
+            snprintf(how_far, sizeof(how_far), "%u/%u nodes walked", result->walk_nodes_visited,
+                     result->tree_nodes);
+            pp_err_add(errs, fi->rel_path, how_far, "walk_truncated");
+        } else if (result->lsp_skipped) {
+            /* Indexed, but without the per-file and cross-file LSP refinement:
+             * the same kind of hole from the other direction. Nothing in
+             * production sets this any more except a truncated walk (handled
+             * above) and the test seam — it is reported anyway, so that if
+             * something sets it again the gap arrives named, not silent. */
+            char size_text[CBM_SZ_64];
+            snprintf(size_text, sizeof(size_text), "%u nodes", result->tree_nodes);
+            pp_err_add(errs, fi->rel_path, size_text, "lsp_skipped");
+        }
 
         /* Create definition nodes in local gbuf */
         for (int d = 0; d < result->defs.count; d++) {
