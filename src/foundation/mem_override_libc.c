@@ -140,8 +140,15 @@ __attribute__((constructor(101))) static void libc_resolve(void) {
  * constructor resolves its own target once. */
 #define RESOLVED(ptr, name) ((ptr) ? (ptr) : ((ptr) = dlsym(RTLD_NEXT, name)))
 
-__attribute__((no_builtin("memcpy", "memmove",
-                          "memset"))) static void *slow_move(void *d, const void *s, size_t n) {
+/* Spelled through a macro only because the three builtin names plus this
+ * signature come to 117 columns, and a wrapped attribute is the one thing
+ * clang-format 20 and 22 lay out differently -- CI runs 20, the local lane runs
+ * Homebrew's 22, so the wrapped form passed here and failed there. Fitting the
+ * line under the 100-column limit leaves no wrapping decision to disagree on.
+ * The siblings below fit as they are and stay inline. */
+#define NO_BUILTIN_MEM __attribute__((no_builtin("memcpy", "memmove", "memset")))
+
+NO_BUILTIN_MEM static void *slow_move(void *d, const void *s, size_t n) {
     unsigned char *dd = (unsigned char *)d;
     const unsigned char *ss = (const unsigned char *)s;
     if (dd < ss) {
