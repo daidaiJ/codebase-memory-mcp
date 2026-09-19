@@ -832,8 +832,16 @@ static void pp_spill_enter(extract_ctx_t *ec, const char *reason) {
 }
 
 static bool pp_spill_active(const extract_ctx_t *ec) {
-    return ec->pctx && ec->pctx->spill &&
-           atomic_load_explicit(&ec->pctx->spill_mode, memory_order_acquire) != 0;
+    /* The atomic gates the pointer, not the other way round. pp_spill_enter
+     * assigns ec->pctx->spill under spill_mu and only THEN release-stores
+     * spill_mode, so a reader that has acquired a non-zero spill_mode is
+     * guaranteed to see the finished pointer. Testing the pointer first read it
+     * with no synchronisation at all while another worker was publishing it —
+     * a genuine data race on an 8-byte write, which TSan caught at
+     * pass_parallel.c:817 against this line. Short-circuit order is load
+     * bearing here; do not reorder these terms. */
+    return ec->pctx && atomic_load_explicit(&ec->pctx->spill_mode, memory_order_acquire) != 0 &&
+           ec->pctx->spill;
 }
 
 CBMFileResult *cbm_pipeline_result_acquire(const cbm_pipeline_ctx_t *ctx, CBMFileResult **cache,
