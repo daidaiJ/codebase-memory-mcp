@@ -49,9 +49,17 @@ esac
 # logic with synthetic logs instead of a copy of it that can drift
 # (tests/test_vm_verdict_contract.sh). See the two-channel note at the call
 # site for why the log outranks the exit status.
+# `mode` is "full" for the whole venue leg and "iteration" for a named subset of
+# suites. Only the full leg prints the completion marker, because only the full
+# leg HAS an end to reach: scripts/test.sh --suites finishes after the suites it
+# was given and says nothing more. Requiring the marker in both modes made every
+# `win.sh test <suites>` run report failure while passing -- 23 passed, 1
+# skipped, rc=0, called red. A guard against false greens is not allowed to
+# invent false reds.
 vm_verdict() {
     local log="$1"
     local rc="$2"
+    local mode="${3:-full}"
     if ! grep -Eq '[0-9]+ passed' "$log"; then
         echo "GUARD: test runner produced no completion summary — the suites did" \
             "not validly run; treating as failure (runner rc=$rc)" >&2
@@ -66,9 +74,17 @@ vm_verdict() {
         echo "GUARD: the log reports $failed_total failed test(s) (runner rc=$rc)" >&2
         return 1
     fi
-    if [ "$complete" -eq 0 ]; then
+    if [ "$mode" = "full" ] && [ "$complete" -eq 0 ]; then
         echo "GUARD: the log has a summary but no completion marker — the leg" \
             "stopped before the end (runner rc=$rc)" >&2
+        return 1
+    fi
+    if [ "$mode" != "full" ] && [ "${rc:-1}" -ne 0 ]; then
+        # No marker to lean on here, so a non-zero status is the only evidence
+        # that the run ended badly after its last summary line. Iteration mode
+        # is a developer tool, not a gate, so it obeys rc rather than overriding
+        # it the way the full leg does.
+        echo "GUARD: suites reported no failures but the run exited $rc" >&2
         return 1
     fi
     if [ "${rc:-1}" -ne 0 ]; then
@@ -81,11 +97,11 @@ vm_verdict() {
 
 # Verdict-only mode for the contract test: decide a log WITHOUT a VM.
 if [ "${1:-}" = "--verdict" ]; then
-    if [ $# -ne 3 ]; then
-        echo "usage: vm-run-tests.sh --verdict <log> <rc>" >&2
+    if [ $# -lt 3 ] || [ $# -gt 4 ]; then
+        echo "usage: vm-run-tests.sh --verdict <log> <rc> [full|iteration]" >&2
         exit 2
     fi
-    vm_verdict "$2" "$3"
+    vm_verdict "$2" "$3" "${4:-full}"
     exit $?
 fi
 
@@ -227,7 +243,9 @@ fi
 #
 # So the LOG decides the test outcome (the runner writes it locally; it cannot
 # be mangled in transit) and rc decides what the log cannot see. Green requires
-# zero reported failures AND the completion marker that scripts/test.sh prints
-# as its last statement — a leg that stopped early has a summary but no marker.
-vm_verdict "$LOG" "$rc"
+# zero reported failures AND, for the full leg, the completion marker that
+# scripts/test.sh prints as its last statement — a leg that stopped early has a
+# summary but no marker. A named subset of suites prints no marker at all, so it
+# is judged on its summaries and its exit status instead.
+vm_verdict "$LOG" "$rc" "$([ "$1" = "--par" ] && echo full || echo iteration)"
 exit $?
