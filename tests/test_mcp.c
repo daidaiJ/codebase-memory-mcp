@@ -5800,8 +5800,14 @@ TEST(tool_check_index_coverage_freshness_uses_indexer_mtime_source_issue1714) {
                                          info.size),
               CBM_STORE_OK);
 
-    char *response = cbm_mcp_handle_tool(
-        srv, "check_index_coverage", "{\"project\":\"test-project\",\"paths\":[\"main.go\"]}");
+    /* format=json, like every other coverage test here: the DEFAULT response is
+     * the compact table, in which a field name never appears. Keeping the
+     * assertion on the JSON field is what makes it exact — a bare strstr for
+     * "metadata_match" would also be satisfied by a neighbouring column or by
+     * another path's row. */
+    char *response = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                                         "{\"project\":\"test-project\",\"paths\":[\"main.go\"],"
+                                         "\"format\":\"json\"}");
     ASSERT_NOT_NULL(response);
     ASSERT_NOT_NULL(strstr(response, "\"freshness\":\"metadata_match\""));
     free(response);
@@ -5815,8 +5821,9 @@ TEST(tool_check_index_coverage_freshness_uses_indexer_mtime_source_issue1714) {
         ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "",
                                              seconds_mtime_ns, info.size),
                   CBM_STORE_OK);
-        response = cbm_mcp_handle_tool(
-            srv, "check_index_coverage", "{\"project\":\"test-project\",\"paths\":[\"main.go\"]}");
+        response = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                                       "{\"project\":\"test-project\",\"paths\":[\"main.go\"],"
+                                       "\"format\":\"json\"}");
         ASSERT_NOT_NULL(response);
         ASSERT_NOT_NULL(strstr(response, "\"freshness\":\"metadata_changed\""));
         free(response);
