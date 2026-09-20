@@ -2182,7 +2182,6 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
 
     TSTree *tree = ts_parser_parse_with_options(parser, NULL, ts_input, opts);
     uint64_t t1 = now_ns();
-    uint64_t parse_cpu_ns = cbm_thread_cpu_time_ns() - cpu_start_ns;
 #ifdef CBM_ENABLE_TEST_SEAMS
     t1 += tl_parse_wall_seam_offset_ns; /* the stall seam inflates every wall reading */
 #endif
