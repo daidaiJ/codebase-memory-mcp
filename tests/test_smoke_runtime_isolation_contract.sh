@@ -79,4 +79,25 @@ done < "$ENV_LOG"
 
 [[ ! -e "$private_root" ]] || fail "smoke-test left its private root behind: $private_root"
 
+# The run above exits through the fixture trap, so it cannot show what happens
+# to the private root when the harness dies before that trap exists — the
+# fixture mktemp and its cygpath conversion are in that window, and under
+# `set -e` either can end the run. Reproducing that failure would mean scanning
+# the shared /tmp parent for orphaned roots, which races every other harness
+# test in the same suite, so pin the ordering instead: the cleanup trap is
+# armed between the init call and the first fixture work.
+smoke="$ROOT/scripts/smoke-test.sh"
+smoke_line_of() {
+    # A missing pattern is the failure this check reports, not a reason to end
+    # the test silently under `set -e`.
+    grep -n "$1" "$smoke" | head -1 | cut -d: -f1 || true
+}
+init_line=$(smoke_line_of '^cbm_test_runtime_init$')
+early_trap_line=$(smoke_line_of "^trap 'cbm_test_runtime_cleanup \"\$BINARY\"' EXIT\$")
+fixture_line=$(smoke_line_of '^TMPDIR=\$(smoke_mktemp_dir)$')
+if [[ -z "$init_line" || -z "$early_trap_line" || -z "$fixture_line" ]] ||
+    ((early_trap_line < init_line || early_trap_line > fixture_line)); then
+    fail "smoke-test must arm the runtime cleanup trap between cbm_test_runtime_init and its first fixture"
+fi
+
 echo "PASS: smoke harness isolates its daemon runtime and cache from the caller"
