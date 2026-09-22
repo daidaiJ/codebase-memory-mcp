@@ -1182,7 +1182,7 @@ int main(int argc, char **argv) {
     /* Config link */
     RUN_SELECTED_SUITE(configlink);
 
-    /* Doc/shell file reference link */
+    /* Markdown file reference link */
     RUN_SELECTED_SUITE(doclinks);
 
     /* Infrastructure scanning */

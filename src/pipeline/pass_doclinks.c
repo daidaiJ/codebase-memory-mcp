@@ -30,6 +30,8 @@
 #include "foundation/log.h"
 #include "foundation/compat_fs.h"
 #include "foundation/limits.h"
+#include "foundation/mem_core.h"
+#include "foundation/dyn_array.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -50,8 +52,7 @@
 #define DOCLINK_EDGE_TYPE "REFERENCES_FILE"
 
 enum {
-    DOCLINK_MAX_REFS = CBM_SZ_256, /* distinct targets per referencing file */
-    DOCLINK_MAX_SEGS = CBM_SZ_64,  /* path segments during normalization */
+    DOCLINK_MAX_SEGS = CBM_SZ_64, /* path segments during normalization */
 };
 
 /* ── Path classification ─────────────────────────────────────────── */
@@ -71,23 +72,51 @@ static bool doclink_is_markdown_path(const char *path) {
     return ext && (strcmp(ext, ".md") == 0 || strcmp(ext, ".mdx") == 0);
 }
 
-/* ── File reading (mirrors pass_semantic.c read_file, minus TS pad) ── */
-
-static char *doclink_read_file(const char *path) {
+/* ── File reading (mirrors pass_definitions.c read_file, minus TS pad) ──
+ *
+ * Reports *out_status so the caller can attribute a skip to the right
+ * reason (open failure vs. oversized vs. OOM) instead of a silent drop —
+ * hitting a limit here degrades to a REPORTED skip, per limits.h. */
+static char *doclink_read_file(const char *path, long *out_size, cbm_read_status_t *out_status) {
+    if (out_size) {
+        *out_size = 0;
+    }
+    if (out_status) {
+        *out_status = CBM_READ_OK;
+    }
     FILE *f = cbm_fopen(path, "rb");
     if (!f) {
+        if (out_status) {
+            *out_status = CBM_READ_OPEN_FAIL;
+        }
         return NULL;
     }
     (void)fseek(f, 0, SEEK_END);
     long size = ftell(f);
     (void)fseek(f, 0, SEEK_SET);
-    if (size <= 0 || size > cbm_max_file_bytes()) {
+    if (out_size) {
+        *out_size = size;
+    }
+    if (size <= 0) {
         (void)fclose(f);
+        if (out_status) {
+            *out_status = CBM_READ_EMPTY;
+        }
         return NULL;
     }
-    char *buf = malloc((size_t)size + SKIP_ONE);
+    if (size > cbm_max_file_bytes()) {
+        (void)fclose(f);
+        if (out_status) {
+            *out_status = CBM_READ_OVERSIZED;
+        }
+        return NULL;
+    }
+    char *buf = cbm_alloc(CBM_MEM_CLASS_EXTRACT, (size_t)size + SKIP_ONE);
     if (!buf) {
         (void)fclose(f);
+        if (out_status) {
+            *out_status = CBM_READ_OOM;
+        }
         return NULL;
     }
     size_t nread = fread(buf, SKIP_ONE, (size_t)size, f);
@@ -140,33 +169,45 @@ static bool doclink_normalize(const char *in, char *out, size_t out_sz) {
     return out_len > 0;
 }
 
-/* Per-file accumulator: dedupes repeated references to the same target. */
+/* One raw match before dedup. Collected in a growable vector (no per-file
+ * cap) and collapsed by doclink_flush(). */
 typedef struct {
     int64_t target_id;
-    int count;
     double confidence;
     const char *strategy; /* static string literal */
-} doclink_ref_t;
+} doclink_match_t;
 
 typedef struct {
     cbm_gbuf_t *gb;
     CBMHashTable *files_by_path; /* rel_path → cbm_gbuf_node_t* (borrowed) */
     const cbm_gbuf_node_t *src;  /* referencing File node */
     char src_dir[CBM_SZ_512];    /* its directory ("" at repo root) */
-    doclink_ref_t refs[DOCLINK_MAX_REFS];
-    int ref_count;
-    bool truncated;
+    CBM_DYN_ARRAY(doclink_match_t) matches;
 } doclink_ctx_t;
 
-/* Resolve a reference against the referencing file's directory, then the
- * repo root, mirroring how humans write doc links. Returns the already-
- * indexed File node or NULL — unresolvable references are dropped. */
+/* How a reference was written, which decides where it may resolve. Mixing
+ * these up let a rooted "/x" still match a same-named file in the
+ * referencing directory, and let an explicit "./x" fall back to an
+ * unrelated same-named file at the repo root. */
+typedef enum {
+    DOCLINK_REF_BARE = 0, /* "x": referencing dir, then repo root */
+    DOCLINK_REF_RELATIVE, /* "./x": referencing dir only */
+    DOCLINK_REF_ROOTED,   /* "/x": repo root only */
+} doclink_ref_kind_t;
+
+/* Resolve a reference against the referencing file's directory and/or the
+ * repo root, per its kind. Returns the already-indexed File node or NULL —
+ * unresolvable references are dropped. */
 static const cbm_gbuf_node_t *doclink_resolve(doclink_ctx_t *dc, const char *ref) {
     const char *r = ref;
-    while (r[0] == '.' && r[SKIP_ONE] == '/') {
-        r += PAIR_LEN;
-    }
-    if (r[0] == '/') {
+    doclink_ref_kind_t kind = DOCLINK_REF_BARE;
+    if (r[0] == '.' && r[SKIP_ONE] == '/') {
+        kind = DOCLINK_REF_RELATIVE;
+        while (r[0] == '.' && r[SKIP_ONE] == '/') {
+            r += PAIR_LEN;
+        }
+    } else if (r[0] == '/') {
+        kind = DOCLINK_REF_ROOTED;
         r++; /* "/docs/x.md" is repo-root-relative by doc convention */
     }
     if (r[0] == '\0') {
@@ -174,7 +215,7 @@ static const cbm_gbuf_node_t *doclink_resolve(doclink_ctx_t *dc, const char *ref
     }
 
     char norm[CBM_SZ_512];
-    if (dc->src_dir[0] != '\0') {
+    if (kind != DOCLINK_REF_ROOTED && dc->src_dir[0] != '\0') {
         char joined[CBM_SZ_512];
         int n = snprintf(joined, sizeof(joined), "%s/%s", dc->src_dir, r);
         if (n > 0 && (size_t)n < sizeof(joined) && doclink_normalize(joined, norm, sizeof(norm))) {
@@ -184,61 +225,67 @@ static const cbm_gbuf_node_t *doclink_resolve(doclink_ctx_t *dc, const char *ref
             }
         }
     }
-    if (doclink_normalize(r, norm, sizeof(norm))) {
+    if (kind != DOCLINK_REF_RELATIVE && doclink_normalize(r, norm, sizeof(norm))) {
         return cbm_ht_get(dc->files_by_path, norm);
     }
     return NULL;
 }
 
-/* Record one match. Same-pair repeats bump the count; a higher-confidence
- * strategy upgrades the edge's confidence + strategy label. */
+/* Record one match. No cap, no dedup here — dc->matches is a plain append
+ * log; doclink_flush() sorts and collapses same-target matches so a
+ * generated file with hundreds of distinct targets loses nothing. */
 static void doclink_record(doclink_ctx_t *dc, const cbm_gbuf_node_t *target, double confidence,
                            const char *strategy) {
     if (!target || target->id == dc->src->id) {
         return; /* never self-reference */
     }
-    for (int i = 0; i < dc->ref_count; i++) {
-        if (dc->refs[i].target_id == target->id) {
-            dc->refs[i].count++;
-            if (confidence > dc->refs[i].confidence) {
-                dc->refs[i].confidence = confidence;
-                dc->refs[i].strategy = strategy;
-            }
-            return;
-        }
-    }
-    if (dc->ref_count >= DOCLINK_MAX_REFS) {
-        dc->truncated = true;
-        return;
-    }
-    dc->refs[dc->ref_count].target_id = target->id;
-    dc->refs[dc->ref_count].count = SKIP_ONE;
-    dc->refs[dc->ref_count].confidence = confidence;
-    dc->refs[dc->ref_count].strategy = strategy;
-    dc->ref_count++;
+    doclink_match_t m = {.target_id = target->id, .confidence = confidence, .strategy = strategy};
+    cbm_da_push(&dc->matches, m);
 }
 
-/* Emit accumulated references as REFERENCES_FILE edges. Returns edge count. */
+static int doclink_match_cmp(const void *a, const void *b) {
+    int64_t ta = ((const doclink_match_t *)a)->target_id;
+    int64_t tb = ((const doclink_match_t *)b)->target_id;
+    return (ta > tb) - (ta < tb);
+}
+
+/* Emit accumulated references as REFERENCES_FILE edges. Sorts by target id
+ * (O(M log M)) and collapses same-target runs: count = occurrences, the
+ * highest-confidence match in the run wins strategy + confidence. Returns
+ * edge count. */
 static int doclink_flush(doclink_ctx_t *dc) {
+    if (dc->matches.count > 1) {
+        qsort(dc->matches.items, (size_t)dc->matches.count, sizeof(dc->matches.items[0]),
+              doclink_match_cmp);
+    }
+
     int emitted = 0;
-    for (int i = 0; i < dc->ref_count; i++) {
+    int i = 0;
+    while (i < dc->matches.count) {
+        int64_t target_id = dc->matches.items[i].target_id;
+        double confidence = dc->matches.items[i].confidence;
+        const char *strategy = dc->matches.items[i].strategy;
+        int count = SKIP_ONE;
+        int j = i + SKIP_ONE;
+        while (j < dc->matches.count && dc->matches.items[j].target_id == target_id) {
+            count++;
+            if (dc->matches.items[j].confidence > confidence) {
+                confidence = dc->matches.items[j].confidence;
+                strategy = dc->matches.items[j].strategy;
+            }
+            j++;
+        }
+
         char props[CBM_SZ_256];
         (void)snprintf(props, sizeof(props),
-                       "{\"strategy\":\"%s\",\"confidence\":%.2f,\"count\":%d}",
-                       dc->refs[i].strategy, dc->refs[i].confidence, dc->refs[i].count);
-        if (cbm_gbuf_insert_edge(dc->gb, dc->src->id, dc->refs[i].target_id, DOCLINK_EDGE_TYPE,
-                                 props) > 0) {
+                       "{\"strategy\":\"%s\",\"confidence\":%.2f,\"count\":%d}", strategy,
+                       confidence, count);
+        if (cbm_gbuf_insert_edge(dc->gb, dc->src->id, target_id, DOCLINK_EDGE_TYPE, props) > 0) {
             emitted++;
         }
+        i = j;
     }
-    if (dc->truncated) {
-        char cap_buf[CBM_SZ_16];
-        (void)snprintf(cap_buf, sizeof(cap_buf), "%d", DOCLINK_MAX_REFS);
-        cbm_log_info("doclinks.truncated", "file", dc->src->file_path ? dc->src->file_path : "",
-                     "cap", cap_buf);
-    }
-    dc->ref_count = 0;
-    dc->truncated = false;
+    cbm_da_clear(&dc->matches);
     return emitted;
 }
 
@@ -380,11 +427,15 @@ static void doclink_scan_md_line(doclink_ctx_t *dc, char *line) {
 
 /* ── Per-file driver ─────────────────────────────────────────────── */
 
-/* Scan one referencing file's content line by line and emit its edges. */
-static int doclink_scan_file(doclink_ctx_t *dc, const cbm_gbuf_node_t *node, const char *source) {
+/* Scan one referencing file's content line by line and emit its edges.
+ * `source` is the caller's private mutable buffer (freshly read for this
+ * file, never reused): lines are terminated in place ('\n' -> '\0') and
+ * scanned by pointer, so there is no fixed-size copy and no line-length
+ * cap to straddle a token across (a prior CBM_SZ_4K copy buffer could cut
+ * "src/foo.cpp" to "src/foo.c" at the boundary and bind to the wrong
+ * file). A trailing '\r' (CRLF) is trimmed the same way. */
+static int doclink_scan_file(doclink_ctx_t *dc, const cbm_gbuf_node_t *node, char *source) {
     dc->src = node;
-    dc->ref_count = 0;
-    dc->truncated = false;
     dc->src_dir[0] = '\0';
     const char *slash = strrchr(node->file_path, '/');
     if (slash) {
@@ -396,18 +447,20 @@ static int doclink_scan_file(doclink_ctx_t *dc, const cbm_gbuf_node_t *node, con
         dc->src_dir[dlen] = '\0';
     }
 
-    const char *p = source;
-    char line[CBM_SZ_4K];
+    char *p = source;
     while (*p) {
-        const char *eol = strchr(p, '\n');
-        size_t line_len = eol ? (size_t)(eol - p) : strlen(p);
-        if (line_len >= sizeof(line)) {
-            line_len = sizeof(line) - SKIP_ONE;
+        char *line = p;
+        char *eol = strchr(p, '\n');
+        if (eol) {
+            *eol = '\0';
+            p = eol + SKIP_ONE;
+        } else {
+            p += strlen(p);
         }
-        memcpy(line, p, line_len);
-        line[line_len] = '\0';
-        p = eol ? eol + SKIP_ONE : p + line_len;
-
+        size_t line_len = strlen(line);
+        if (line_len > 0 && line[line_len - SKIP_ONE] == '\r') {
+            line[line_len - SKIP_ONE] = '\0';
+        }
         doclink_scan_md_line(dc, line);
     }
     return doclink_flush(dc);
@@ -426,10 +479,16 @@ static bool doclink_has_doc_files(const cbm_gbuf_node_t *const *files, int file_
 }
 
 /* Scan every markdown File node's on-disk content, emitting edges.
- * md_edges receives the emitted edge count. */
-static void doclink_scan_repo(doclink_ctx_t *dc, const char *repo_path,
+ * md_edges receives the emitted edge count. Checks cancellation once per
+ * file — on a docs-heavy repo this is the whole pass's cancel latency —
+ * and every skip is reported via cbm_pipeline_add_file_error, never
+ * silent. */
+static void doclink_scan_repo(cbm_pipeline_ctx_t *ctx, doclink_ctx_t *dc, const char *repo_path,
                               const cbm_gbuf_node_t *const *files, int file_count, int *md_edges) {
     for (int i = 0; i < file_count; i++) {
+        if (cbm_pipeline_check_cancel(ctx)) {
+            return;
+        }
         if (!files[i]->file_path || !doclink_is_markdown_path(files[i]->file_path)) {
             continue;
         }
@@ -439,12 +498,29 @@ static void doclink_scan_repo(doclink_ctx_t *dc, const char *repo_path,
         if (n <= 0 || (size_t)n >= sizeof(abs_path)) {
             continue;
         }
-        char *source = doclink_read_file(abs_path);
+        long file_size = 0;
+        cbm_read_status_t rst = CBM_READ_OK;
+        char *source = doclink_read_file(abs_path, &file_size, &rst);
         if (!source) {
+            if (rst == CBM_READ_OVERSIZED) {
+                long cap = cbm_max_file_bytes();
+                char reason[96];
+                (void)snprintf(reason, sizeof(reason), "oversized (%lld MB > %lld MB)",
+                               (long long)(file_size / (CBM_SZ_1K * CBM_SZ_1K)),
+                               (long long)(cap / (CBM_SZ_1K * CBM_SZ_1K)));
+                cbm_pipeline_add_file_error(ctx->pipeline, files[i]->file_path, reason,
+                                            "oversized");
+                cbm_log_warn("doclinks.file_oversized", "path", files[i]->file_path);
+            } else if (rst == CBM_READ_OPEN_FAIL || rst == CBM_READ_OOM) {
+                cbm_pipeline_add_file_error(ctx->pipeline, files[i]->file_path, "read failed",
+                                            "read");
+                cbm_log_warn("doclinks.file_unreadable", "path", files[i]->file_path);
+            }
+            /* CBM_READ_EMPTY: benign 0-byte file, nothing to index, not reported. */
             continue;
         }
         int emitted = doclink_scan_file(dc, files[i], source);
-        free(source);
+        cbm_free(CBM_MEM_CLASS_EXTRACT, source);
         *md_edges += emitted;
     }
 }
@@ -458,7 +534,7 @@ int cbm_pipeline_pass_doclinks(cbm_pipeline_ctx_t *ctx) {
         return 0;
     }
 
-    /* Early exit: no markdown/shell files means nothing to scan. */
+    /* Early exit: no markdown files means nothing to scan. */
     if (!doclink_has_doc_files(files, file_count)) {
         cbm_log_info("doclinks.skip", "reason", "no_doc_files");
         return 0;
@@ -483,7 +559,8 @@ int cbm_pipeline_pass_doclinks(cbm_pipeline_ctx_t *ctx) {
     }
 
     int md_edges = 0;
-    doclink_scan_repo(&dc, ctx->repo_path, files, file_count, &md_edges);
+    doclink_scan_repo(ctx, &dc, ctx->repo_path, files, file_count, &md_edges);
+    cbm_da_free(&dc.matches);
     cbm_ht_free(dc.files_by_path);
 
     char buf1[CBM_SZ_16];
