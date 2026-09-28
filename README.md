@@ -15,9 +15,9 @@
 
 | 维度 | 上游默认 | 本 fork 默认 | 说明 |
 |------|---------|-------------|------|
-| MCP 工具面 | 全部 15 个工具 | **3 个**：`get_architecture` / `query_graph` / `detect_changes` | 经 grep + codegraph 基线对照实测保留；`--tool-profile=all` 恢复全量 |
+| MCP 工具面 | 全部 17 个工具 | **3 个**：`get_architecture` / `query_graph` / `detect_changes` | 经 grep + codegraph 基线对照实测保留；`--tool-profile=all` 恢复全量 |
 | `auto_watch` | `true`（会话连接即注册文件监听） | **`false`** | 常驻 watcher 是会话期最大资源户，显式索引工作流下纯冗余 |
-| 日志级别 | `info` | **`error`** | info/warn 级噪声每次冷启都打到 CLI stderr |
+| 日志级别 | role-aware（前端 `warn` / daemon `info`） | 库内静态默认 **`error`** | 上游 v0.10+ 已改 role-aware 启动策略，fork 保留更严的库级兜底 |
 | 内存预算 | RAM × 25%/35%/50%，无上限 | **封顶 2048 MiB** | 32GB 机器上游默认拿 11.4GB；`CBM_MEM_BUDGET_MB` 仍可显式上调 |
 | 图谱 UI | 首次运行自动启用 HTTP 服务 | **关闭**，需显式开启 | 零使用意图不应自我激活环回端口 |
 | 工具禁用 | 无 | **`tools_disabled`** 配置键 | MCP/CLI 双侧生效、fail-loud、`--help` 同步隐藏 |
@@ -44,7 +44,7 @@ codebase-memory-mcp cli query_graph --tool complex-ranking --limit 20
 codebase-memory-mcp cli detect_changes      # diff 驱动的影响半径
 ```
 
-CLI 保留全部 15 个工具（除非被 `tools_disabled` 禁用）——被裁剪的是 **MCP 面**，不是 CLI 面。
+CLI 保留全部 17 个工具（除非被 `tools_disabled` 禁用）——被裁剪的是 **MCP 面**，不是 CLI 面。
 
 ### MCP 接入
 
