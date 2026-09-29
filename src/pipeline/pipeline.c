@@ -3329,6 +3329,45 @@ static void sweep_one_stage(const char *stage_path) {
                  stage_path);
 }
 
+void cbm_pipeline_sweep_orphan_stages_dir(const char *dir_path) {
+    if (!dir_path || !dir_path[0]) {
+        return;
+    }
+    cbm_dir_t *dir = cbm_opendir(dir_path);
+    if (!dir) {
+        return;
+    }
+    stage_name_list_t list = {0};
+    cbm_dirent_t *entry;
+    while ((entry = cbm_readdir(dir)) != NULL) {
+        /* Any project's orphan: every stage-looking entry in the directory. */
+        size_t stage_len = stage_entry_stage_length_any_base(entry->name);
+        if (stage_len) {
+            stage_name_list_add(&list, entry->name, stage_len);
+        }
+    }
+    cbm_closedir(dir);
+    size_t dir_len = strlen(dir_path);
+    bool has_trailing_sep =
+        dir_len && (dir_path[dir_len - 1] == '/' || dir_path[dir_len - 1] == '\\');
+    for (int i = 0; i < list.count; i++) {
+        size_t name_len = strlen(list.names[i]);
+        size_t join_len = dir_len + (has_trailing_sep ? 0 : 1) + name_len;
+        char *stage_path = (char *)malloc(join_len + 1);
+        if (stage_path) {
+            memcpy(stage_path, dir_path, dir_len);
+            if (!has_trailing_sep) {
+                stage_path[dir_len] = '/';
+            }
+            memcpy(stage_path + dir_len + (has_trailing_sep ? 0 : 1), list.names[i], name_len + 1);
+            sweep_one_stage(stage_path);
+            free(stage_path);
+        }
+        free(list.names[i]);
+    }
+    free(list.names);
+}
+
 static void sweep_orphan_stages(const char *final_path) {
     /* Directory part INCLUDING its trailing separator, so the stage paths
      * are joined exactly as the final path was spelled. */
@@ -3342,12 +3381,7 @@ static void sweep_orphan_stages(const char *final_path) {
             prefix_len = (size_t)(c - final_path) + 1;
         }
     }
-    const char *base = final_path + prefix_len;
-    size_t base_len = strlen(base);
-    if (base_len == 0) {
-        return;
-    }
-    char *dir_path = prefix_len ? (char *)malloc(prefix_len + 1) : strdup(".");
+    char *dir_path = prefix_len ? malloc(prefix_len + 1) : strdup(".");
     if (!dir_path) {
         return;
     }
@@ -3355,35 +3389,7 @@ static void sweep_orphan_stages(const char *final_path) {
         memcpy(dir_path, final_path, prefix_len);
         dir_path[prefix_len] = '\0';
     }
-    cbm_dir_t *dir = cbm_opendir(dir_path);
-    if (!dir) {
-        free(dir_path);
-        return;
-    }
-    stage_name_list_t list = {0};
-    cbm_dirent_t *entry;
-    while ((entry = cbm_readdir(dir)) != NULL) {
-        /* Any project's orphan, not just this one's: see
-         * stage_entry_stage_length_any_base. `base` still anchors the log line
-         * and the path rebuild below. */
-        size_t stage_len = stage_entry_stage_length_any_base(entry->name);
-        if (stage_len) {
-            stage_name_list_add(&list, entry->name, stage_len);
-        }
-    }
-    cbm_closedir(dir);
-    for (int i = 0; i < list.count; i++) {
-        size_t name_len = strlen(list.names[i]);
-        char *stage_path = (char *)malloc(prefix_len + name_len + 1);
-        if (stage_path) {
-            memcpy(stage_path, final_path, prefix_len);
-            memcpy(stage_path + prefix_len, list.names[i], name_len + 1);
-            sweep_one_stage(stage_path);
-            free(stage_path);
-        }
-        free(list.names[i]);
-    }
-    free(list.names);
+    cbm_pipeline_sweep_orphan_stages_dir(dir_path);
     free(dir_path);
 }
 

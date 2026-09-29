@@ -3093,6 +3093,82 @@ int cbm_store_count_nodes(cbm_store_t *s, const char *project) {
     return count;
 }
 
+/* One exact whole-store COUNT. Returns CBM_STORE_ERR on prepare/step failure —
+ * never a silent 0 (upstream #2012: a corrupt store read as "empty"). */
+static int store_maintenance_count(cbm_store_t *s, const char *sql, const char *what) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, what);
+        return CBM_STORE_ERR;
+    }
+    int count = CBM_STORE_ERR;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        count = sqlite3_column_int(stmt, 0);
+    } else {
+        store_set_error_sqlite(s, what);
+    }
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+int cbm_store_maintenance_stats(cbm_store_t *s, int lsp_orphan_probe_cap,
+                                cbm_store_maintenance_stats_t *out) {
+    if (!s || !s->db || !out || lsp_orphan_probe_cap < 1) {
+        return CBM_STORE_ERR;
+    }
+    cbm_store_maintenance_stats_t stats;
+    memset(&stats, 0, sizeof(stats));
+
+    stats.nodes_rows =
+        store_maintenance_count(s, "SELECT COUNT(*) FROM nodes;", "maintenance count nodes");
+    if (stats.nodes_rows < 0) {
+        return CBM_STORE_ERR;
+    }
+    stats.fts_rows =
+        store_maintenance_count(s, "SELECT COUNT(*) FROM nodes_fts;", "maintenance count fts");
+    if (stats.fts_rows < 0) {
+        return CBM_STORE_ERR;
+    }
+    stats.lsp_rows = store_maintenance_count(s, "SELECT COUNT(*) FROM lsp_surface;",
+                                             "maintenance count lsp_surface");
+    if (stats.lsp_rows < 0) {
+        return CBM_STORE_ERR;
+    }
+
+    /* Bounded orphan probe: lsp_surface rows whose file has no node anymore.
+     * The NOT EXISTS is index-backed (idx_nodes_file on project+file_path);
+     * the LIMIT caps the scan on large stores. Hitting the cap reports "at
+     * least this many" instead of quietly undercounting. */
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db,
+                           "SELECT COUNT(*) FROM ("
+                           "  SELECT 1 FROM lsp_surface s"
+                           "  WHERE NOT EXISTS ("
+                           "    SELECT 1 FROM nodes n"
+                           "    WHERE n.project = s.project AND n.file_path = s.rel_path)"
+                           "  LIMIT ?1);",
+                           -1, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "maintenance orphan probe");
+        return CBM_STORE_ERR;
+    }
+    sqlite3_bind_int(stmt, 1, lsp_orphan_probe_cap);
+    int orphans = CBM_STORE_ERR;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        orphans = sqlite3_column_int(stmt, 0);
+    } else {
+        store_set_error_sqlite(s, "maintenance orphan probe");
+    }
+    sqlite3_finalize(stmt);
+    if (orphans < 0) {
+        return CBM_STORE_ERR;
+    }
+    stats.lsp_orphans = orphans;
+    stats.lsp_capped = orphans >= lsp_orphan_probe_cap;
+
+    *out = stats;
+    return CBM_STORE_OK;
+}
+
 int cbm_store_delete_nodes_by_project(cbm_store_t *s, const char *project) {
     sqlite3_stmt *stmt = prepare_cached(s, &s->stmt_delete_nodes_by_project,
                                         "DELETE FROM nodes WHERE project = ?1;");

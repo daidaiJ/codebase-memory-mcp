@@ -395,4 +395,12 @@ typedef struct {
  * Returns count written to out (capped at max_out). */
 int cbm_parse_hunks(const char *output, cbm_changed_hunk_t *out, int max_out);
 
+/* Sweep dead staging DBs in the given directory (fork issue #8). Same
+ * judgment as the per-run sweep: a stage whose sidecar flock is gone (or that
+ * predates sidecar locks) is an orphan and is removed; a live writer's stage
+ * is kept. Runs against the whole cache directory at daemon bootstrap — the
+ * per-run sweep only ever covered the directory of the path being indexed.
+ * Best-effort; failures are logged, never fatal. */
+void cbm_pipeline_sweep_orphan_stages_dir(const char *dir_path);
+
 #endif /* CBM_PIPELINE_H */

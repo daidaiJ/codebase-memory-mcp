@@ -8,6 +8,7 @@
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"
+#include "foundation/cache_sweep.h"
 #include "foundation/log.h"
 #include "foundation/mem.h"
 #include "foundation/platform.h"
@@ -3059,6 +3060,21 @@ cbm_daemon_application_t *cbm_daemon_application_new(
         cbm_watcher_set_project_mutation_guard(
             application->watcher, application_watcher_mutation_begin,
             application_watcher_mutation_end, application_watcher_project_pruned, application);
+    }
+    /* Startup housekeeping (fork #8): the cache only ever grew before — one
+     * skip log per degraded run, supervisor temp files from crashed workers,
+     * search scratch from killed clients, and staging DBs from killed index
+     * runs (the per-run sweep only fired on the next run of the SAME path).
+     * Best-effort: log the yield, never block or fail session serving. */
+    const char *sweep_cache = cbm_resolve_cache_dir();
+    if (sweep_cache && sweep_cache[0]) {
+        int removed = cbm_cache_sweep_run(sweep_cache);
+        cbm_pipeline_sweep_orphan_stages_dir(sweep_cache);
+        if (removed > 0) {
+            char removed_text[16];
+            snprintf(removed_text, sizeof(removed_text), "%d", removed);
+            cbm_log_info("daemon.startup_sweep", "removed", removed_text);
+        }
     }
     return application;
 }

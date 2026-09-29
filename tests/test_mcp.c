@@ -31,8 +31,11 @@
 #include <sys/stat.h> /* chmod / stat for read-only query reproductions */
 #ifdef _WIN32
 #include <direct.h>
+#include <utime.h> /* cache-sweep fixtures backdate file mtimes */
 #define cbm_chdir _chdir
 #define cbm_getcwd _getcwd
+#define th_utime _utime
+#define th_utimbuf _utimbuf
 #else
 #ifdef __APPLE__
 #include <libproc.h>
@@ -41,8 +44,11 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <utime.h>
 #define cbm_chdir chdir
 #define cbm_getcwd getcwd
+#define th_utime utime
+#define th_utimbuf utimbuf
 extern char **environ;
 #endif
 
@@ -14286,6 +14292,206 @@ TEST(tool_detect_changes_honesty_note_in_both_formats) {
     PASS();
 }
 
+/* ── Fork issue #8: cache retention sweeps + index_status maintenance ── */
+
+static void th_backdate_mtime_days(const char *path, double days) {
+    struct th_utimbuf tb;
+    time_t now = time(NULL);
+    tb.actime = (time_t)(now - (time_t)(days * 86400.0));
+    tb.modtime = tb.actime;
+    ASSERT_EQ(th_utime(path, &tb), 0);
+}
+
+static bool th_file_exists(const char *path) {
+    FILE *f = cbm_fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+    fclose(f);
+    return true;
+}
+
+/* Preflight residue + young files -> sweep -> old removed, young kept. */
+TEST(cache_sweep_prunes_skip_logs_worker_temp_and_scratch) {
+    char cache[CBM_SZ_4K];
+    snprintf(cache, sizeof(cache), "%s/cbm-sweep-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    char logs[CBM_SZ_4K];
+    snprintf(logs, sizeof(logs), "%s/logs", cache);
+    ASSERT_TRUE(cbm_mkdir_p(logs, 0700));
+
+    char path[CBM_SZ_4K];
+    /* proj-a: 12 fresh skip logs — exactly the newest 10 survive. */
+    for (int i = 0; i < 12; i++) {
+        snprintf(path, sizeof(path), "%s/proj-a-%d.log", logs, 1700000000 + i);
+        ASSERT_EQ(th_write_file(path, "# skip\n"), 0);
+    }
+    /* proj-b: a 40-day-old log — removed regardless of the keep window. */
+    snprintf(path, sizeof(path), "%s/proj-b-1700000099.log", logs);
+    ASSERT_EQ(th_write_file(path, "# skip\n"), 0);
+    th_backdate_mtime_days(path, 40.0);
+    /* A log file that is not a skip log must never be touched. */
+    snprintf(path, sizeof(path), "%s/daemon.log", logs);
+    ASSERT_EQ(th_write_file(path, "log\n"), 0);
+
+    /* Worker temp: an old one goes, a young one stays (live-run safety). */
+    snprintf(path, sizeof(path), "%s/.worker-log-old0001", logs);
+    ASSERT_EQ(th_write_file(path, "old\n"), 0);
+    th_backdate_mtime_days(path, 2.0 / 24.0);
+    snprintf(path, sizeof(path), "%s/.worker-response-new0001", logs);
+    ASSERT_EQ(th_write_file(path, "young\n"), 0);
+
+    ASSERT_GT(cbm_cache_sweep_run(cache), 0);
+
+    int kept_a = 0;
+    for (int i = 0; i < 12; i++) {
+        snprintf(path, sizeof(path), "%s/proj-a-%d.log", logs, 1700000000 + i);
+        if (th_file_exists(path)) {
+            kept_a++;
+        }
+    }
+    ASSERT_EQ(kept_a, 10);
+    snprintf(path, sizeof(path), "%s/proj-b-1700000099.log", logs);
+    ASSERT_FALSE(th_file_exists(path));
+    snprintf(path, sizeof(path), "%s/daemon.log", logs);
+    ASSERT_TRUE(th_file_exists(path));
+    snprintf(path, sizeof(path), "%s/.worker-log-old0001", logs);
+    ASSERT_FALSE(th_file_exists(path));
+    snprintf(path, sizeof(path), "%s/.worker-response-new0001", logs);
+    ASSERT_TRUE(th_file_exists(path));
+
+    /* Search scratch in the system temp: an old directory (with its file)
+     * goes, a young one stays. */
+    char scratch_old[CBM_SZ_4K];
+    snprintf(scratch_old, sizeof(scratch_old), "%s/cbm-search-oldXXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(scratch_old));
+    snprintf(path, sizeof(path), "%s/pat", scratch_old);
+    ASSERT_EQ(th_write_file(path, "x\n"), 0);
+    th_backdate_mtime_days(scratch_old, 2.0 / 24.0);
+    char scratch_young[CBM_SZ_4K];
+    snprintf(scratch_young, sizeof(scratch_young), "%s/cbm-search-youngXXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(scratch_young));
+
+    ASSERT_GT(cbm_cache_sweep_search_scratch(), 0);
+    ASSERT_FALSE(th_file_exists(scratch_old));
+    ASSERT_TRUE(th_file_exists(scratch_young));
+    (void)cbm_rmdir(scratch_young);
+
+    ASSERT_EQ(th_rmtree(cache), 0);
+    PASS();
+}
+
+/* Retention accounting (fork issue #8): the FTS/lsp_surface retention
+ * mechanism is reproduced for real — node deletion leaves its FTS row behind
+ * (delta only deletes from nodes), and an lsp_surface row for a deleted file
+ * lingers. index_status must surface the churn, recommend a rebuild past the
+ * ratio, and never fake precision on the capped orphan probe. */
+TEST(index_status_maintenance_accounts_fts_and_lsp_orphans) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+    const char *proj = "maint-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    ASSERT_EQ(cbm_store_upsert_project(st, proj, "/tmp/maint"), CBM_STORE_OK);
+
+    /* Fail-loud (upstream #2012 semantics): a NULL store is an error, not an
+     * empty store. */
+    cbm_store_maintenance_stats_t bad;
+    ASSERT_EQ(cbm_store_maintenance_stats(NULL, 512, &bad), CBM_STORE_ERR);
+
+    int64_t id_a = 0;
+    int64_t id_b = 0;
+    for (int i = 0; i < 2; i++) {
+        cbm_node_t n = {.project = proj,
+                        .label = "Function",
+                        .name = i == 0 ? "fn_a" : "fn_b",
+                        .qualified_name = i == 0 ? "maint-proj.fn_a" : "maint-proj.fn_b",
+                        .file_path = i == 0 ? "src/a.c" : "src/b.c",
+                        .start_line = 1,
+                        .end_line = 2};
+        int64_t id = cbm_store_upsert_node(st, &n);
+        ASSERT_GT(id, 0);
+        if (i == 0) {
+            id_a = id;
+        } else {
+            id_b = id;
+        }
+    }
+    (void)id_a;
+    (void)id_b;
+    cbm_lsp_surface_row_t lsp[2] = {
+        {.project = proj,
+         .rel_path = "src/b.c",
+         .surface_sha = "sha-b",
+         .defs_json = "[]",
+         .ref_bloom = NULL,
+         .ref_bloom_len = 0,
+         .config_ctx = ""},
+        {.project = proj,
+         .rel_path = "src/gone.c",
+         .surface_sha = "sha-gone",
+         .defs_json = "[]",
+         .ref_bloom = NULL,
+         .ref_bloom_len = 0,
+         .config_ctx = ""},
+    };
+    ASSERT_EQ(cbm_store_upsert_lsp_surface_batch(st, lsp, 2), CBM_STORE_OK);
+
+    /* Baseline: 2 nodes, 2 FTS rows, 2 lsp rows, exactly 1 orphan. */
+    cbm_store_maintenance_stats_t stats;
+    ASSERT_EQ(cbm_store_maintenance_stats(st, 512, &stats), CBM_STORE_OK);
+    ASSERT_EQ(stats.nodes_rows, 2);
+    ASSERT_EQ(stats.fts_rows, 2);
+    ASSERT_EQ(stats.lsp_rows, 2);
+    ASSERT_EQ(stats.lsp_orphans, 1);
+    ASSERT_FALSE(stats.lsp_capped);
+
+    /* The retention mechanism itself: delta deletes skip the FTS index.
+     * Delete src/a.c's node, then churn a temp node five times — each cycle
+     * adds an FTS row that nothing reclaims. */
+    ASSERT_EQ(cbm_store_delete_nodes_by_file(st, proj, "src/a.c"), CBM_STORE_OK);
+    for (int i = 0; i < 5; i++) {
+        cbm_node_t n = {.project = proj,
+                        .label = "Function",
+                        .name = "fn_tmp",
+                        .qualified_name = "maint-proj.fn_tmp",
+                        .file_path = "src/tmp.c",
+                        .start_line = 1,
+                        .end_line = 2};
+        ASSERT_GT(cbm_store_upsert_node(st, &n), 0);
+        ASSERT_EQ(cbm_store_delete_nodes_by_file(st, proj, "src/tmp.c"), CBM_STORE_OK);
+    }
+
+    ASSERT_EQ(cbm_store_maintenance_stats(st, 512, &stats), CBM_STORE_OK);
+    ASSERT_EQ(stats.nodes_rows, 1);
+    ASSERT_EQ(stats.fts_rows, 7); /* 2 baseline + 5 churn orphans; a's row also orphaned */
+    ASSERT_EQ(stats.lsp_orphans, 1);
+
+    /* index_status surfaces it, with rebuild recommended past the ratio. */
+    char *response = cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"maint-proj\"}");
+    ASSERT_NOT_NULL(response);
+    char *inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    yyjson_doc *doc = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *m = yyjson_obj_get(root, "maintenance");
+    ASSERT_NOT_NULL(m);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(m, "fts_rows")), 7);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(m, "nodes_rows")), 1);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(m, "lsp_surface_orphans")), 1);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(m, "lsp_surface_orphans_relation")), "eq");
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(m, "rebuild_recommended")));
+    ASSERT_NOT_NULL(yyjson_obj_get(m, "rebuild_note"));
+    yyjson_doc_free(doc);
+    free(inner);
+    free(response);
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(tool_detect_changes_finds_nested_untracked_file_and_impact_seed) {
     char repo[CBM_SZ_4K];
     snprintf(repo, sizeof(repo), "%s/cbm-detect-untracked-path-XXXXXX", cbm_tmpdir());
@@ -20955,6 +21161,8 @@ SUITE(mcp) {
     RUN_TEST(tool_detect_changes_invalid_base_is_an_error);
     RUN_TEST(tool_detect_changes_preserves_utf8_git_path_and_impact_seed);
     RUN_TEST(tool_detect_changes_honesty_note_in_both_formats);
+    RUN_TEST(cache_sweep_prunes_skip_logs_worker_temp_and_scratch);
+    RUN_TEST(index_status_maintenance_accounts_fts_and_lsp_orphans);
     RUN_TEST(tool_detect_changes_finds_nested_untracked_file_and_impact_seed);
     RUN_TEST(tool_detect_changes_escapes_newline_path_in_tree_and_round_trips_json);
     RUN_TEST(tool_detect_changes_staged_rename_uses_exact_destination_record);

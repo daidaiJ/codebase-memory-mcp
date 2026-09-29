@@ -197,6 +197,48 @@ honest about the limit instead of faking precision.
   marked fixed (upstream commit `60390aff`, in the fork baseline, pinned by
   the `invalid_rejected` assertion in test_mcp.c).
 
+## 7. Cache retention sweeps + index_status maintenance accounting (fork issue #8)
+
+The cache and store previously only ever grew: one degraded-index skip log
+per run (`<cache>/logs/<project>-<epoch>.log`, unbounded), supervisor temp
+files (`.worker-*-XXXXXX`) and search scratch dirs (`<tmp>/cbm-search-*`)
+left behind by crashes, staging DBs from killed index runs (the per-run sweep
+only fired on the next run of the SAME final path), and two retention leaks
+inside the store — contentless-FTS dead rows (delta deletes touch only
+`nodes`) and `lsp_surface` rows for files that no longer exist (cleared only
+by a full index). Phase 2's "storage retention" ticket fixes all three zones
+with pure subtraction: no config keys, constants only (solve "unbounded"
+first; parameterize on real usage feedback).
+
+- `src/foundation/cache_sweep.c/.h` (new) — `cbm_cache_sweep_skip_logs`
+  (per project keep 10, drop >30 days), `cbm_cache_sweep_worker_temp` and
+  `cbm_cache_sweep_search_scratch` (remove older than 1h — a live run's
+  files are young by construction), `cbm_cache_sweep_run` = all three.
+- `src/pipeline/pipeline.c` + `pipeline.h` — the per-run orphan-stage sweep
+  generalized to `cbm_pipeline_sweep_orphan_stages_dir(dir)`: same flock-dead
+  judgment, now callable against the whole cache directory.
+- Hooks: daemon bootstrap (`cbm_daemon_application_new` — cache sweep + full
+  stage sweep), first supervised worker spawn (CLI runs that never open a
+  daemon session still sweep), and after each skip-log write (prune while the
+  directory is hot; `CBM_INDEX_LOG` overrides are never touched).
+- `src/store/store.c/.h` — `cbm_store_maintenance_stats`: exact whole-store
+  counts of `nodes` / `nodes_fts` / `lsp_surface` plus a bounded orphan probe
+  (lsp rows whose file has no node; `LIMIT`-capped, reported as `gte` when
+  the cap is hit). FAIL-LOUD per upstream #2012: any failing count is
+  `CBM_STORE_ERR`, never a silent 0 — index_status renders
+  `maintenance_status: "unavailable"` instead of faking a clean store.
+- `src/mcp/mcp.c` — index_status gains a `maintenance` section: the counts,
+  `lsp_surface_orphans` + `_relation`, and — when `fts_rows > 3x nodes_rows`
+  (named constant) — `rebuild_recommended: true` with a one-line note that a
+  full re-index is the contentless FTS index's only reclamation path. No
+  auto-rebuild, no auto_vacuum: the numbers surface, the maintainer decides.
+- Tests (`tests/test_mcp.c`):
+  `cache_sweep_prunes_skip_logs_worker_temp_and_scratch` (residue + young
+  files → sweep → old removed, young kept; non-skip logs untouched) and
+  `index_status_maintenance_accounts_fts_and_lsp_orphans` (reproduces the
+  retention mechanism for real — delete-by-file leaves the FTS row, churn
+  accumulates it — and pins counts, orphan probe and rebuild recommendation).
+
 ## Verification notes
 
 - `tests/test_mem.c` updated to the capped-default semantics (incl. new

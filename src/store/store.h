@@ -544,6 +544,27 @@ int cbm_store_find_node_ids_by_qns(cbm_store_t *s, const char *project, const ch
 /* Count nodes in project. Returns count or CBM_STORE_ERR. */
 int cbm_store_count_nodes(cbm_store_t *s, const char *project);
 
+/* Retention accounting for index_status (fork issue #8). The contentless FTS5
+ * index only shrinks on a full rebuild (delta deletes skip it), and
+ * lsp_surface rows for deleted files linger until the next full index — both
+ * are invisible churn until counted. */
+typedef struct {
+    int nodes_rows;    /* whole-store node rows (this fork: one DB per project) */
+    int fts_rows;      /* nodes_fts index rows */
+    int lsp_rows;      /* whole-store lsp_surface rows */
+    int lsp_orphans;   /* lsp_surface rows whose file has no node anymore */
+    int lsp_capped;    /* true when the probe cap truncated the orphan scan */
+} cbm_store_maintenance_stats_t;
+
+/* Whole-store maintenance counts. FAIL-LOUD (upstream #2012 semantics): any
+ * failing COUNT returns CBM_STORE_ERR and leaves *out untouched — a corrupt
+ * store must never report itself as "empty" through this path.
+ * lsp_orphan_probe_cap bounds the orphan probe (per-row NOT EXISTS is
+ * index-backed but not free); when the cap is hit, lsp_orphans == cap and
+ * lsp_capped is set (the real count is >= lsp_orphans). */
+int cbm_store_maintenance_stats(cbm_store_t *s, int lsp_orphan_probe_cap,
+                                cbm_store_maintenance_stats_t *out);
+
 int cbm_store_count_nodes_scoped(cbm_store_t *s, const char *project, const char *path);
 
 int cbm_store_count_edges_scoped(cbm_store_t *s, const char *project, const char *path);

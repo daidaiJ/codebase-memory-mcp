@@ -6,6 +6,7 @@
 #include "daemon/runtime.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h" /* cbm_mkdir_p, cbm_fopen */
+#include "foundation/cache_sweep.h"
 #include "foundation/constants.h"
 #include "foundation/log.h"
 #include "foundation/platform.h" /* cbm_safe_getenv, path normalization */
@@ -662,6 +663,12 @@ int cbm_index_worker_start_with_log(const char *args_json, size_t memory_budget_
         *handle_out = NULL;
     }
     atomic_fetch_add_explicit(&g_spawn_count, 1, memory_order_relaxed);
+    if (atomic_load_explicit(&g_spawn_count, memory_order_relaxed) == 1) {
+        /* First supervised spawn in this process doubles as the supervisor's
+         * startup sweep (fork #8): CLI runs that never open a daemon session
+         * still reclaim their stale skip logs / temp files. Best-effort. */
+        (void)cbm_cache_sweep_run(cbm_resolve_cache_dir());
+    }
     if (single_thread) {
         atomic_fetch_add_explicit(&g_spawn_st_count, 1, memory_order_relaxed);
     }

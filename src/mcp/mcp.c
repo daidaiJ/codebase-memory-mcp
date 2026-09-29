@@ -69,6 +69,7 @@ enum {
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"
+#include "foundation/cache_sweep.h"
 #include "foundation/log.h"
 #include "foundation/limits.h"
 #include "foundation/subprocess.h"
@@ -6859,6 +6860,43 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
     return result;
 }
 
+/* Retention accounting (fork issue #8). The contentless FTS index and
+ * lsp_surface rows of deleted files only shrink on a full rebuild; the store
+ * never reclaims them on its own. Surface the numbers so a human can decide
+ * — no auto-rebuild, no VACUUM scheduling. FAIL-LOUD on count failure
+ * (upstream #2012 semantics): "unavailable" with the error kept visible, a
+ * corrupt store must never read as a clean empty one. */
+#define INDEX_MAINTENANCE_LSP_ORPHAN_PROBE_CAP 512
+#define INDEX_MAINTENANCE_FTS_REBUILD_RATIO 3.0
+
+static void add_maintenance_report(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                   cbm_store_t *store) {
+    cbm_store_maintenance_stats_t stats;
+    if (cbm_store_maintenance_stats(store, INDEX_MAINTENANCE_LSP_ORPHAN_PROBE_CAP, &stats) !=
+        CBM_STORE_OK) {
+        yyjson_mut_obj_add_str(doc, root, "maintenance_status", "unavailable");
+        return;
+    }
+    yyjson_mut_val *m = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "maintenance", m);
+    yyjson_mut_obj_add_int(doc, m, "nodes_rows", stats.nodes_rows);
+    yyjson_mut_obj_add_int(doc, m, "fts_rows", stats.fts_rows);
+    yyjson_mut_obj_add_int(doc, m, "lsp_surface_rows", stats.lsp_rows);
+    yyjson_mut_obj_add_int(doc, m, "lsp_surface_orphans", stats.lsp_orphans);
+    yyjson_mut_obj_add_str(doc, m, "lsp_surface_orphans_relation",
+                           stats.lsp_capped ? "gte" : "eq");
+    if (stats.nodes_rows > 0) {
+        double ratio = (double)stats.fts_rows / (double)stats.nodes_rows;
+        if (ratio > INDEX_MAINTENANCE_FTS_REBUILD_RATIO) {
+            yyjson_mut_obj_add_bool(doc, m, "rebuild_recommended", true);
+            yyjson_mut_obj_add_str(
+                doc, m, "rebuild_note",
+                "FTS index rows far exceed node rows (dead rows from incremental deletes); "
+                "a full re-index is the only reclamation path for the contentless FTS index.");
+        }
+    }
+}
+
 static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
@@ -6900,6 +6938,7 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
         }
         add_coverage_report(doc, root, store, project, have_proj_info ? proj_info.indexed_at : NULL,
                             coverage_samples);
+        add_maintenance_report(doc, root, store);
         safe_str_free(&proj_info.name);
         safe_str_free(&proj_info.indexed_at);
         safe_str_free(&proj_info.root_path);
@@ -10508,6 +10547,18 @@ static bool write_skip_logfile(const char *project, const cbm_file_error_t *errs
                       errs[i].reason ? errs[i].reason : "", errs[i].path ? errs[i].path : "");
     }
     (void)fclose(f);
+    /* Fork #8 housekeeping: one skip log per degraded run used to accumulate
+     * forever. A fresh write makes the logs directory hot, so prune now.
+     * Only for the default location — a CBM_INDEX_LOG override lives wherever
+     * the user pointed it and is not ours to prune. */
+    if (!override) {
+        int swept = cbm_cache_sweep_skip_logs(cbm_resolve_cache_dir());
+        if (swept > 0) {
+            char swept_text[16];
+            snprintf(swept_text, sizeof(swept_text), "%d", swept);
+            cbm_log_info("cache.sweep.skip_logs", "removed", swept_text);
+        }
+    }
     if (out_path && out_sz) {
         snprintf(out_path, out_sz, "%s", path);
     }
