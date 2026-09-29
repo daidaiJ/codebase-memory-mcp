@@ -1,24 +1,38 @@
 ---
 handoff_id: local-build-test-first-run
-status: active
+status: done
 ---
 
 ## 1. 目标
 
 在本机首次实跑维护者配方「全量构建 + 测试」（AGENTS.md 收尾状态里的「唯二未完成项」），暴露并记录测试面问题，供维护者接续跑完后半部分并修复。
 
-## 2. 当前进度与状态
+## 2. 当前进度与状态（2026-09-29 会话更新）
 
-- **当前阶段：** 构建完成 ✅；测试编译阻塞已修复并推送（`fd89f6a3`）；聚焦测试集已跑完，结果已记录；**全量测试只跑了约 45%（~6400/144 suites 中断）**，剩余由维护者继续。
-- **状态：** in-progress（测试执行未跑完 + 失败项待修）
-- **进度：**
-  - [x] MSYS2 CLANG64 工具链装好（`D:\tool\msys64`，便携自包含）
-  - [x] 生产二进制构建通过（`make -f Makefile.cbm cbm`，clang 22.1.8，-Werror 全绿）
-  - [x] `tests/test_mcp.c` 4 处编译错误修复（commit `fd89f6a3`，已推送）
-  - [x] 聚焦测试集：`mcp watcher go_lsp c_lsp py_lsp rust_lsp ts_lsp java_lsp java_lsp_coverage` → **2336 PASS / 173 FAIL / 11 SKIP**
-  - [x] 语言 suite（用户关心的 java/rust/js/ts/go/c-cpp/python）**全部 PASS，0 失败**
-  - [ ] 全量测试剩余 ~135 个 suite 未跑（用户回自己跑后半部分）
-  - [ ] 失败项修复（见 §6，优先级见 §11）
+- **状态：done（测试欠账修复完成）。** 聚焦五套件
+  `mcp watcher log index_policy subprocess` → **458 PASS / 0 FAIL / 29 SKIP**
+  （Windows，gcc 13.2 MinGW-Builds + mingw32-make，`SANITIZE=` 显式关闭——
+  本会话发现上会话装的 `D:\tool\msys64` 已被删除且其 gcc 无 ASan 运行时；
+  权威工具链仍是 MSYS2 CLANG64，见 docs/BUILD_WINDOWS.md）。
+- 上会话的 172 个 mcp 失败 + watcher 1 + 孤立 3 全部清零；测试运行还暴露了
+  **四个真实产品缺陷**，均已修复（详见 docs/FORK_PATCHES.md §10）：
+  1. MinGW usable-size 误路由 → `charge_size` 内 `RtlSizeHeap` 陷阱
+     （`src/foundation/mem_core.c`，MinGW 直接走 `mi_usable_size`）
+  2. c2 deepen cursor decode 字段序反了，任何 minted cursor 都被拒
+     （`src/mcp/mcp.c`，fork issue #9 的真实缺陷）
+  3. Job Object 内存证据：上游只加了 `job_memory_*` 字段和断言，查询从未实现
+     （`src/foundation/subprocess.c` 补 `cbm_win_capture_job_memory`；
+     enforcing test 的 cap 从 1 GiB 改 256 MiB——探针只交 512 MiB）
+  4. detect_changes 预算 floor 漏 `changed_total/returned/has_more` + continuation
+     reason（`src/mcp/mcp.c`）
+- 测试侧：148 处 fixture 建 server 改 `test_server_all_surface()`；默认值断言
+  改写 fork 语义（log 默认 error、auto_watch 默认不注册、issue403/autoindex
+  显式 ALL 面——auto-index 在 fork 里按设计只在 ALL 面运行）；FTS 记账
+  fixture 按 pipeline 模式调 `cbm_store_fts_rebuild`；cache_sweep 目录存在性
+  改 stat 探测（fopen 探测目录在 Windows 恒 false）。
+- [ ] 全量 144 suite 仍待维护者跑完（本会话验证聚焦五套件）；WSL/ASan 侧只
+      复跑过 index_policy（12/12），改后的 mcp.c/subprocess.c 未在 ASan 下复跑
+- 旧记录（历史参考）保留在下方 §3 起。
 
 ## 3. 关键证据
 

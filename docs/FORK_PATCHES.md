@@ -375,3 +375,42 @@ The block is OMITTED when there is no signal (no watcher, `auto_watch=off`
   - Full-suite note: `make -f Makefile.cbm test` on a maintainer machine is
     the acceptance gate (fork CI builds only); see docs/BUILD_WINDOWS.md for
     the Windows recipe.
+
+## 10. Test-debt repayment + merge-gap repairs (2026-09-29)
+
+The maintainer's first full Windows test run (MSYS2 CLANG64 + ASan) found the
+suite out of sync with the fork's inverted defaults; the repayment followed the
+test-debt design in `plans/depth-tiering-toolset.md` §5.1 (fixtures opt into
+the legacy ALL surface, default-contract tests assert fork semantics). The run
+also exposed four real defects that only a test run can catch — all fixed:
+
+- **MinGW usable-size query** (`src/foundation/mem_core.c`): under the linker
+  wrap (`--wrap=malloc/calloc/_msize`), `charge_size` asked `_msize`, which
+  re-derived block ownership via `mi_is_in_heap_region` and misrouted while
+  worker threads expanded the allocator page map — `RtlSizeHeap` trap on a
+  fresh block. MinGW builds now call `mi_usable_size` directly (every block
+  this file measures was served by the wrap).
+- **c2 deepen cursor decode** (`src/mcp/mcp.c`, fork issue #9): decode read
+  depth before the leg, but the wire order is `c2.<leg>.<depth>...` — every
+  minted deepen cursor was rejected as unrecognized. Decode now matches
+  encode; `tool_trace_path_deepen_cursor_pulls_next_tier` and the generation
+  matrix prove the round trip.
+- **Job Object memory evidence** (`src/foundation/subprocess.c`): upstream
+  added the `job_memory_*` result fields and asserting tests without the query
+  that fills them. `cbm_win_capture_job_memory` now records limit/peak/available
+  at the terminal transition; the enforcing test's cap moved to 256 MiB (the
+  probe commits 512 MiB, so a 1 GiB cap can never trip).
+- **detect_changes budget floor** (`src/mcp/mcp.c`): the floor response omitted
+  the change totals; a budget-strapped agent needs them most. The floor now
+  carries `changed_total/changed_returned/changed_has_more` plus the
+  continuation-reason key, mirroring the normal emitter.
+
+Test-side alignment: fixtures use `test_server_all_surface()` (ALL surface);
+`log_level_default` asserts the fork's error default; auto_watch default
+rewritten to "unset registers nothing" + explicit-true registers; issue403 /
+autoindex probes run on the ALL surface because auto-index is gated to it by
+design; the FTS maintenance fixture drives `cbm_store_fts_rebuild` the way the
+pipeline does. Verified: `test-focused TEST_SUITES="mcp watcher log
+index_policy subprocess"` → 458 PASS / 0 FAIL / 29 SKIP (gcc 13.2, SANITIZE=
+because the local MinGW gcc ships no ASan runtime; the recipe toolchain stays
+MSYS2 CLANG64).
