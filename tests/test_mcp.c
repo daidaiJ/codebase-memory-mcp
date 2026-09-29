@@ -1298,14 +1298,17 @@ TEST(mcp_tools_list_latest_metadata) {
      * relationships used for call/reference/type centrality, not every edge
      * family (for example DEFINES or CONTAINS_FILE). Keep the public contract
      * aligned with the store query. */
-    ASSERT_NOT_NULL(strstr(json, "Find symbols via BM25 query, regex name/qn filters, or "
-                                 "semantic_query"));
-    ASSERT_NOT_NULL(strstr(json, "Rows keep qn/file/lines and in/out over CALLS"));
-    ASSERT_NOT_NULL(strstr(json, "USAGE"));
-    ASSERT_NOT_NULL(strstr(json, "CALL_REFERENCE"));
-    ASSERT_NOT_NULL(strstr(json, "INHERITS"));
-    ASSERT_NOT_NULL(strstr(json, "IMPLEMENTS"));
+    ASSERT_NOT_NULL(strstr(json, "Find symbols by keyword, regex, or semantic query"));
+    ASSERT_NOT_NULL(strstr(json, "Degree columns count CALLS/USAGE/CALL_REFERENCE/"
+                                 "INHERITS/IMPLEMENTS edges"));
     ASSERT_NULL(strstr(json, "TOTAL degree across ALL edge types"));
+    /* Descriptions are trigger + interpretation lines; the paging/honesty
+     * fine print lives in the inputSchema and skills/cbm/SKILL.md, not on
+     * the wire of every discovery response. */
+    ASSERT_NOT_NULL(strstr(json, "Read-only Cypher over the code knowledge graph"));
+    ASSERT_NOT_NULL(strstr(json, "Compact architecture overview of an indexed project"));
+    ASSERT_NULL(strstr(json, "absence is not proof"));
+    ASSERT_NULL(strstr(json, "continue safely with next_cursor"));
     free(json);
     PASS();
 }

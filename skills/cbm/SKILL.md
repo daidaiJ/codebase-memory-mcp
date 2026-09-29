@@ -1,11 +1,11 @@
 ---
 name: cbm
-description: 当需要架构概览/模块聚类/复杂度热点排行（codegraph 无架构视图）、commit 影响半径（diff 驱动，codegraph impact 只能符号驱动）、大型或陌生仓库整体理解时，用 codebase-memory-mcp CLI 查询预索引知识图谱。小项目或单符号查询直接用 grep/codegraph，不要动 cbm。
+description: 当需要架构概览/模块聚类/复杂度热点排行（codegraph 无架构视图）、commit 影响半径（diff 驱动，codegraph impact 只能符号驱动）、大型或陌生仓库整体理解、全仓符号/调用图查询时，用 codebase-memory-mcp 查询预索引知识图谱（CLI 全量，或 MCP 最小 3 工具 search_graph/query_graph/get_architecture）。小项目或单符号查询直接用 grep/codegraph。
 ---
 
 # cbm（codebase-memory-mcp fork）— 架构级图谱查询（低频重型工具）
 
-定位：**只做 codegraph 和 grep 做不了/不划算的事**。使用 fork 补丁版 CLI（命令名 `codebase-memory-mcp`，安装见下节）；MCP 注册保持移除，全部能力走 CLI。
+定位：**只做 codegraph 和 grep 做不了/不划算的事**。两种形态共享同一份预索引图谱：CLI（`codebase-memory-mcp`，17 工具全量，安装见下节）与 MCP 最小面（3 个只读工具，细则见「MCP 工具面细则」）。shell 可用的会话优先 CLI；受限客户端嵌 MCP 面。
 实测依据（2026-09-05，websearch-mcpserver 三场对照实验）：
 
 - **赢的场景**：架构概览（fan-in 热点/边界权重/分层/聚类，grep 需十几次调用）、全仓函数复杂度排行（cognitive 维度 LOC 给不出）、commit 级爆炸半径（唯一 diff 驱动形态）
@@ -30,6 +30,8 @@ CLI 是单文件可执行程序，从 fork release 下载放进 PATH 即可：
 - 原始 JSON 传参有 deprecation 警告（未来版本可能移除），届时 `codebase-memory-mcp cli <tool> --help` 查 flag 形式
 
 ## 命令配方（实测可用语法）
+
+（以下 JSON 体与 MCP `tools/call` 的 arguments 同构，工具名即 CLI 子命令名；MCP 会话可直接换成对应工具调用。）
 
 ### 1. 架构概览（陌生/大型仓库第一站）
 
@@ -64,9 +66,21 @@ codebase-memory-mcp cli check_index_coverage '{"project":"<PROJECT名>","scopes"
 
 大范围采信图谱结果前先跑：`parse_partial` 文件的图谱可能局部失明（cbm 索引自己源码时 81 个文件解析失败）。
 
+## MCP 工具面细则（渐进披露）
+
+MCP `tools/list` 的 description 有意只保留触发语与判读契约（瘦身记录见 docs/FORK_PATCHES.md §11）：参数语义在各自 inputSchema 里，本节承接 schema 表达不了的组合方式与诚实性边界。
+
+| 工具 | 触发 | 机制与判读边界 |
+|---|---|---|
+| `search_graph` | 定位定义/调用方、按名称模式扫符号面 | `query`（BM25 关键词）与 `semantic_query`（嵌入相似）互斥；行带 qn/file/lines，degree 列只统计 CALLS/USAGE/CALL_REFERENCE/INHERITS/IMPLEMENTS 五族边 |
+| `query_graph` | 多跳/聚合/复杂度排行/跨服务分析（配方见上节） | 总数是精确值或下界并带截断标记；**用 `next_cursor` 续读**（保持 query/project/graph 不变，format/max_rows 可变）；`graph=missed` 是覆盖盲区文件树，缺席≠完备 |
+| `get_architecture` | 陌生/大型仓库第一站 | 省略 aspects = languages/packages/entry_points；`overview` = 除 file_tree 外的紧凑集；`cycles` 永远 opt-in；`path` 按目录前缀收窄 |
+
+MCP 最小面没有 get_graph_schema / index_status / detect_changes：Cypher 可用属性直接用上节配方 2 的属性表；索引新鲜度与影响半径走 CLI（或 `--tool-profile=all`）。MCP 最小面也不会自动建索引（auto-index 仅 ALL profile 生效），受限客户端场景先用 CLI 建索引。
+
 ## 硬规则
 
 1. **空结果 ≠ 真阴性**：依次排查 ① 参数非法（direction/项目名/SHA 格式）→ ② coverage 盲区 → ③ grep 复核，三关过了才准信"没有调用方/没有影响"。
 2. 图谱与代码文件冲突时，以代码文件为准，会话开头重跑 hook 或 `codebase-memory-mcp cli index_repository --repo-path . --mode fast`。
 3. 变异管理类（index_repository / delete_project / manage_adr / ingest_traces）同样走 CLI，非必要不碰。
-4. 若要恢复 MCP 形态（受限客户端嵌入场景）：fork 的 MCP 默认只暴露 **3 个工具**（get_architecture / query_graph / detect_changes），`--tool-profile=all` 恢复全量，`--tool-profile=minimal|analysis|scout` 可选；全局 `tools_disabled` 名单与项目本地 `.cbm/config.json` 可细粒度禁用（双侧生效、fail-loud）。配置键见 `codebase-memory-mcp config list`。
+4. 若要恢复 MCP 形态（受限客户端嵌入场景）：fork 的 MCP 默认只暴露 **3 个工具**（search_graph / query_graph / get_architecture；fork issue #5 将 detect_changes 换出，待可信度修复），`--tool-profile=all` 恢复全量，`--tool-profile=minimal|analysis|scout` 可选；全局 `tools_disabled` 名单与项目本地 `.cbm/config.json` 可细粒度禁用（双侧生效、fail-loud）。配置键见 `codebase-memory-mcp config list`。

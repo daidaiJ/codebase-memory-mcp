@@ -483,8 +483,8 @@ static const tool_def_t TOOLS[] = {
      "},\"required\":[\"repo_path\"]}"},
 
     {"search_graph",
-     "Find symbols via BM25 query, regex name/qn filters, or semantic_query. Rows keep "
-     "qn/file/lines and in/out over CALLS/USAGE/CALL_REFERENCE/INHERITS/IMPLEMENTS.",
+     "Find symbols by keyword, regex, or semantic query. Degree columns count "
+     "CALLS/USAGE/CALL_REFERENCE/INHERITS/IMPLEMENTS edges.",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
      "\"query\":{\"type\":\"string\"},"
      "\"label\":{\"type\":\"string\"},\"name_pattern\":{\"type\":\"string\"},\"qn_pattern\":{"
@@ -508,11 +508,8 @@ static const tool_def_t TOOLS[] = {
      "\"required\":[\"project\"]}"},
 
     {"query_graph",
-     "Read-only Cypher for multi-hop, aggregation, complexity, or cross-service analysis. "
-     "Default: 200 visible rows with "
-     "exact/lower-bound totals and truncation; continue safely with next_cursor. "
-     "graph=missed is a file tree of flagged coverage gaps; absence is not proof of completeness. "
-     "Use get_graph_schema(diagnostics=full) for properties.",
+     "Read-only Cypher over the code knowledge graph: multi-hop traversal, aggregation, "
+     "complexity ranking, cross-service analysis.",
      "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Cypher "
      "query\"},\"project\":{\"type\":\"string\"},"
      "\"graph\":{\"type\":\"string\",\"enum\":[\"code\",\"missed\"],\"default\":\"code\","
@@ -616,9 +613,8 @@ static const tool_def_t TOOLS[] = {
      "\"additionalProperties\":false}"},
 
     {"get_architecture",
-     "Compact counts, languages, packages, entry points. Request structure, dependencies, "
-     "routes, hotspots, boundaries, layers, clusters, cycles, or file_tree; path scopes a "
-     "directory.",
+     "Compact architecture overview of an indexed project: counts, languages, packages, "
+     "entry points. Aspects add structure, hotspots, boundaries, clusters.",
      /* The aspects enum mirrors VALID_ASPECTS (see aspect_is_valid) — update both together. */
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"path\":{\"type\":"
      "\"string\",\"description\":\"Directory prefix (for example apps/hoa).\"},"

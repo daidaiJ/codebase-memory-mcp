@@ -414,3 +414,43 @@ pipeline does. Verified: `test-focused TEST_SUITES="mcp watcher log
 index_policy subprocess"` → 458 PASS / 0 FAIL / 29 SKIP (gcc 13.2, SANITIZE=
 because the local MinGW gcc ships no ASan runtime; the recipe toolchain stays
 MSYS2 CLANG64).
+
+## 11. Minimal-face tool descriptions: trigger + interpretation lines, mechanics pushed to the skill (2026-09-30)
+
+**动机**：`tools/list` 的 description 是每个会话的常驻 wire 开销，而其中的
+分页/续读/诚实性细则只有工具被选中后才需要——常驻既稀释触发信号又烧上下文。
+fork 配套 skill（`skills/cbm/SKILL.md`）以渐进披露承载细则：skill description
+常驻（负责触发），body 按需加载（负责机制、配方与判读边界）。顺带修掉一个死
+建议：原 query_graph 描述里的 `get_graph_schema(diagnostics=full)` 路由指针在
+MCP 最小面不可达（该工具不在面上），这类跨工具路由只属于 skill。
+
+**新增不变量（描述分层契约）**：
+
+- description = 触发语 + 结果判读契约。search_graph 的 degree 列五族边枚举是
+  判读契约（度列只统计 CALLS/USAGE/CALL_REFERENCE/INHERITS/IMPLEMENTS），留在
+  描述里，`mcp_tools_list_latest_metadata` 断言看守。
+- inputSchema = 参数契约。aspect 枚举、path 语义、max_rows/cursor 规则等只在
+  schema 出现一次，描述不再复述。
+- `skills/cbm/SKILL.md` = 机制 + 组合配方 + 诚实性边界（next_cursor 续读规则、
+  graph=missed 缺席≠完备、auto-index 仅 ALL profile）。
+
+**逐工具修改点（`src/mcp/mcp.c` TOOLS[]，字符数含标点）**：
+
+- `search_graph` 158→125：匹配机制措辞降为触发级（BM25→keyword；query/
+  name_pattern/semantic_query 的分工 schema 已表达）；保留五族边枚举。
+- `query_graph` 336→125：下推 200 行默认/精确或下界总数/next_cursor 续读规则、
+  graph=missed 诚实性注记、get_graph_schema 路由。
+- `get_architecture` 178→150：aspect 全枚举与 path 语义与 schema 重复，删；
+  保留默认输出形态（languages/packages/entry_points）。
+
+三段合计 672→400（-40%）。顶部 `--help` 的 Tools: 块由同一注册表渲染
+（`cbm_mcp_tools_help_list`），同步变短——描述只有这一处事实源。
+
+**测试**：`tests/test_mcp.c` `mcp_tools_list_latest_metadata` 断言改写为新契约：
+三工具新触发语 + 五族边枚举必须出现；`absence is not proof` /
+`continue safely with next_cursor` 必须缺席（细则已离开 wire 的回归护栏）。
+
+**验证**：`mcp` 套件 321 PASS / 0 FAIL（gcc 13.2，SANITIZE= 本机无 ASan 运行时；
+权威配方仍见 docs/BUILD_WINDOWS.md）。`cli` 套件另有 12 个**预存**失败
+（hook/README-surface 系列，stash 基线对照确认与本节改动无关，属于全量跑批
+遗留债，不在此节修复）。
