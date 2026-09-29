@@ -83,6 +83,7 @@ workflow 只保留 `fork-win64.yml`（构建 + tag 发 release）。上游遗产
 | 内存预算 | cap 只封默认分数，显式 env 永远可上调（`default_capped` 标志随之清零） | 改 resolve_budget 时保持这个单语义 |
 | watcher 触发时序 | fork issue #10：脏变更需**两轮**签名相等才索引（HEAD 移动单轮即触发），成功索引后有 30s 冷却（`CBM_WATCH_COOLDOWN_S`，0 关闭）；`index_status` 带 `freshness` 块 | dirty 路径的 watcher 测试都是「stage + confirm」两轮——rebase 时别「简化」回单轮；freshness 锚是聚合口径，禁止 per-file mtime / Branch.head_sha |
 | MinGW 分配器 wrap | `--wrap=_msize` 经 `mi_is_in_heap_region` 判归属，并发扩页映射时会误判（`charge_size` 内 RtlSizeHeap 陷阱，2026-09-29 实测） | mem_core 的 usable-size 在 MinGW 直接走 `mi_usable_size`，别改回 `_msize` |
+| CLANG64 CI 与 MinGW pragma | clang 同样定义 `__MINGW64__`，但会以 `-Wunknown-warning-option` 拒绝 gcc 专属告警组（v0.11.0-fork.2 首跑即炸在 `-Wmaybe-uninitialized` pragma） | MinGW 守卫里 gcc 专属告警组的 pragma 一律补 `&& !defined(__clang__)`；本地裸 LLVM clang 版本宽松，别拿它当 CI 等价物 |
 | 守护进程冷启 | ~5s（Windows + DACL + 指纹哈希） | CLI 面的策略拒绝必须在 bootstrap **之前**（run_cli 已前置，别挪到 daemon 执行后） |
 
 ## 快速上手命令

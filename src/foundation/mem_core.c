@@ -199,8 +199,11 @@ static void class_sub(cbm_mem_class_t cls, size_t bytes, size_t blocks) {
  * is inlined into cbm_alloc/cbm_calloc the block parameter reads as
  * maybe-uninitialized — a false positive: every caller assigns block from the
  * backing allocator first, and the CI compiler (clang) does not emit this.
- * Keep the suppression local instead of weakening the shared flag set. */
-#if defined(__MINGW32__) || defined(__MINGW64__)
+ * Keep the suppression local instead of weakening the shared flag set. clang
+ * shares __MINGW64__ but rejects the gcc-only warning group under -Werror
+ * (-Wunknown-warning-option, broke the v0.11.0-fork.2 CI run), so the pragma
+ * is gcc-only. */
+#if (defined(__MINGW32__) || defined(__MINGW64__)) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
