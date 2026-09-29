@@ -5,6 +5,7 @@
  */
 #include "../src/foundation/compat.h"
 #include <sqlite3.h>
+#include "../src/foundation/cache_sweep.h" /* fork issue #8 sweep entry points */
 #include "../src/foundation/compat_fs.h" /* cbm_unlink / cbm_rmdir */
 #include "../src/foundation/constants.h"
 #include "../src/foundation/log.h"
@@ -14294,12 +14295,15 @@ TEST(tool_detect_changes_honesty_note_in_both_formats) {
 
 /* ── Fork issue #8: cache retention sweeps + index_status maintenance ── */
 
-static void th_backdate_mtime_days(const char *path, double days) {
+static int th_backdate_mtime_days(const char *path, double days) {
     struct th_utimbuf tb;
     time_t now = time(NULL);
     tb.actime = (time_t)(now - (time_t)(days * 86400.0));
     tb.modtime = tb.actime;
-    ASSERT_EQ(th_utime(path, &tb), 0);
+    if (th_utime(path, &tb) != 0) {
+        return 1;
+    }
+    return 0;
 }
 
 static bool th_file_exists(const char *path) {
@@ -14329,7 +14333,7 @@ TEST(cache_sweep_prunes_skip_logs_worker_temp_and_scratch) {
     /* proj-b: a 40-day-old log — removed regardless of the keep window. */
     snprintf(path, sizeof(path), "%s/proj-b-1700000099.log", logs);
     ASSERT_EQ(th_write_file(path, "# skip\n"), 0);
-    th_backdate_mtime_days(path, 40.0);
+    ASSERT_EQ(th_backdate_mtime_days(path, 40.0), 0);
     /* A log file that is not a skip log must never be touched. */
     snprintf(path, sizeof(path), "%s/daemon.log", logs);
     ASSERT_EQ(th_write_file(path, "log\n"), 0);
@@ -14337,7 +14341,7 @@ TEST(cache_sweep_prunes_skip_logs_worker_temp_and_scratch) {
     /* Worker temp: an old one goes, a young one stays (live-run safety). */
     snprintf(path, sizeof(path), "%s/.worker-log-old0001", logs);
     ASSERT_EQ(th_write_file(path, "old\n"), 0);
-    th_backdate_mtime_days(path, 2.0 / 24.0);
+    ASSERT_EQ(th_backdate_mtime_days(path, 2.0 / 24.0), 0);
     snprintf(path, sizeof(path), "%s/.worker-response-new0001", logs);
     ASSERT_EQ(th_write_file(path, "young\n"), 0);
 
@@ -14367,7 +14371,7 @@ TEST(cache_sweep_prunes_skip_logs_worker_temp_and_scratch) {
     ASSERT_NOT_NULL(cbm_mkdtemp(scratch_old));
     snprintf(path, sizeof(path), "%s/pat", scratch_old);
     ASSERT_EQ(th_write_file(path, "x\n"), 0);
-    th_backdate_mtime_days(scratch_old, 2.0 / 24.0);
+    ASSERT_EQ(th_backdate_mtime_days(scratch_old, 2.0 / 24.0), 0);
     char scratch_young[CBM_SZ_4K];
     snprintf(scratch_young, sizeof(scratch_young), "%s/cbm-search-youngXXXXXX", cbm_tmpdir());
     ASSERT_NOT_NULL(cbm_mkdtemp(scratch_young));
@@ -14494,8 +14498,8 @@ TEST(index_status_maintenance_accounts_fts_and_lsp_orphans) {
 
 /* ── Fork issue #9: depth frontier + deepen cursor ────────────────── */
 
-static void deep_fixture_add_node(cbm_store_t *st, const char *proj, const char *name,
-                                  int64_t *id_out) {
+static int deep_fixture_add_node(cbm_store_t *st, const char *proj, const char *name,
+                                 int64_t *id_out) {
     char qn[64];
     snprintf(qn, sizeof(qn), "deep-proj.%s", name);
     cbm_node_t n = {.project = proj,
@@ -14506,7 +14510,10 @@ static void deep_fixture_add_node(cbm_store_t *st, const char *proj, const char 
                     .start_line = 1,
                     .end_line = 2};
     *id_out = cbm_store_upsert_node(st, &n);
-    ASSERT_GT(*id_out, 0);
+    if (*id_out <= 0) {
+        return 1;
+    }
+    return 0;
 }
 
 /* Four-tier caller chain: a1,a2 -> anchor (hop1), b1 -> a1 (hop2),
@@ -14522,12 +14529,12 @@ TEST(tool_trace_path_deepen_cursor_pulls_next_tier) {
     cbm_store_upsert_project(st, proj, "/tmp/deep");
 
     int64_t anchor = 0, a1 = 0, a2 = 0, b1 = 0, c1 = 0, d1 = 0;
-    deep_fixture_add_node(st, proj, "anchor", &anchor);
-    deep_fixture_add_node(st, proj, "caller_a1", &a1);
-    deep_fixture_add_node(st, proj, "caller_a2", &a2);
-    deep_fixture_add_node(st, proj, "mid_b1", &b1);
-    deep_fixture_add_node(st, proj, "deep_c1", &c1);
-    deep_fixture_add_node(st, proj, "deep_d1", &d1);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "anchor", &anchor), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "caller_a1", &a1), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "caller_a2", &a2), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "mid_b1", &b1), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "deep_c1", &c1), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "deep_d1", &d1), 0);
     (void)anchor;
     (void)a2;
     (void)c1;
@@ -14610,12 +14617,12 @@ TEST(tool_trace_path_cursor_generation_matrix) {
     cbm_store_upsert_project(st, proj, "/tmp/deep");
 
     int64_t anchor = 0, a1 = 0, a2 = 0, b1 = 0, c1 = 0, d1 = 0;
-    deep_fixture_add_node(st, proj, "anchor", &anchor);
-    deep_fixture_add_node(st, proj, "caller_a1", &a1);
-    deep_fixture_add_node(st, proj, "caller_a2", &a2);
-    deep_fixture_add_node(st, proj, "mid_b1", &b1);
-    deep_fixture_add_node(st, proj, "deep_c1", &c1);
-    deep_fixture_add_node(st, proj, "deep_d1", &d1);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "anchor", &anchor), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "caller_a1", &a1), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "caller_a2", &a2), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "mid_b1", &b1), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "deep_c1", &c1), 0);
+    ASSERT_EQ(deep_fixture_add_node(st, proj, "deep_d1", &d1), 0);
     (void)a2;
     (void)b1;
     (void)c1;
