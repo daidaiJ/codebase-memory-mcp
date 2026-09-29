@@ -7452,7 +7452,7 @@ TEST(tool_trace_path_caller_resolution_summary) {
     char *txt = extract_text_content(resp);
     ASSERT_NOT_NULL(txt);
     ASSERT_NOT_NULL(strstr(txt, "callers_total: 3"));
-    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: 2/3 resolved, 1 unresolved"));
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: \"2/3 resolved, 1 unresolved\""));
     ASSERT_NULL(strstr(txt, "caller_resolution_note"));
     ASSERT_NULL(strstr(txt, "lsp_trait_dispatch")); /* class vocabulary only */
     free(txt);
@@ -7487,7 +7487,7 @@ TEST(tool_trace_path_caller_resolution_summary) {
     ASSERT_NOT_NULL(resp);
     txt = extract_text_content(resp);
     ASSERT_NOT_NULL(txt);
-    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: 1/2 resolved, 1 unresolved"));
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: \"1/2 resolved, 1 unresolved\""));
     ASSERT_NOT_NULL(strstr(txt, "caller_resolution_note"));
     ASSERT_NOT_NULL(strstr(txt, "does not mean no callers"));
     free(txt);
@@ -7503,7 +7503,7 @@ TEST(tool_trace_path_caller_resolution_summary) {
     txt = extract_text_content(resp);
     ASSERT_NOT_NULL(txt);
     ASSERT_NOT_NULL(strstr(txt, "callers_total: 0"));
-    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: 0/0 resolved, 0 unresolved"));
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: \"0/0 resolved, 0 unresolved\""));
     ASSERT_NOT_NULL(strstr(txt, "caller_resolution_note"));
     free(txt);
     free(resp);
@@ -7523,7 +7523,7 @@ TEST(tool_trace_path_caller_resolution_summary) {
         occurrences++;
     }
     ASSERT_EQ(occurrences, 1);
-    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: 2/3 resolved, 1 unresolved"));
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: \"2/3 resolved, 1 unresolved\""));
     ASSERT_NULL(strstr(txt, "caller_resolution_note"));
     free(txt);
     free(resp);
@@ -14280,7 +14280,7 @@ TEST(tool_detect_changes_honesty_note_in_both_formats) {
     inner = extract_text_content(response);
     ASSERT_NOT_NULL(inner);
     ASSERT_NOT_NULL(strstr(inner, "graph_support: heuristic-calls"));
-    ASSERT_NOT_NULL(strstr(inner, "resolution_caveat: CALLS edges are resolution heuristics"));
+    ASSERT_NOT_NULL(strstr(inner, "resolution_caveat: \"CALLS edges are resolution heuristics"));
     free(inner);
     free(response);
 
@@ -14487,6 +14487,235 @@ TEST(index_status_maintenance_accounts_fts_and_lsp_orphans) {
     yyjson_doc_free(doc);
     free(inner);
     free(response);
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* ── Fork issue #9: depth frontier + deepen cursor ────────────────── */
+
+static void deep_fixture_add_node(cbm_store_t *st, const char *proj, const char *name,
+                                  int64_t *id_out) {
+    char qn[64];
+    snprintf(qn, sizeof(qn), "deep-proj.%s", name);
+    cbm_node_t n = {.project = proj,
+                    .label = "Function",
+                    .name = name,
+                    .qualified_name = qn,
+                    .file_path = "src/deep.c",
+                    .start_line = 1,
+                    .end_line = 2};
+    *id_out = cbm_store_upsert_node(st, &n);
+    ASSERT_GT(*id_out, 0);
+}
+
+/* Four-tier caller chain: a1,a2 -> anchor (hop1), b1 -> a1 (hop2),
+ * c1 -> b1 (hop3), d1 -> c1 (hop4). tier0 (default depth 3) sees hops 1-3
+ * and the probe must report the hop-4 tier; the deepen cursor must pull it
+ * exactly-once, honoring the cursor's depth over a narrowed depth argument. */
+TEST(tool_trace_path_deepen_cursor_pulls_next_tier) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "deep-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/deep");
+
+    int64_t anchor = 0, a1 = 0, a2 = 0, b1 = 0, c1 = 0, d1 = 0;
+    deep_fixture_add_node(st, proj, "anchor", &anchor);
+    deep_fixture_add_node(st, proj, "caller_a1", &a1);
+    deep_fixture_add_node(st, proj, "caller_a2", &a2);
+    deep_fixture_add_node(st, proj, "mid_b1", &b1);
+    deep_fixture_add_node(st, proj, "deep_c1", &c1);
+    deep_fixture_add_node(st, proj, "deep_d1", &d1);
+    (void)anchor;
+    (void)a2;
+    (void)c1;
+    cbm_edge_t edges[] = {
+        {.project = proj, .source_id = a1, .target_id = anchor, .type = "CALLS"},
+        {.project = proj, .source_id = a2, .target_id = anchor, .type = "CALLS"},
+        {.project = proj, .source_id = b1, .target_id = a1, .type = "CALLS"},
+        {.project = proj, .source_id = c1, .target_id = b1, .type = "CALLS"},
+        {.project = proj, .source_id = d1, .target_id = c1, .type = "CALLS"},
+    };
+    for (size_t e = 0; e < sizeof(edges) / sizeof(edges[0]); e++) {
+        ASSERT_GT(cbm_store_insert_edge(st, &edges[e]), 0);
+    }
+
+    /* tier0: depth defaults to 3 -> hops 1-3 visible (4 rows), hop-4 tier
+     * exists. json emitter: frontier limited, deepen cursor minted. */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":931,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"anchor\","
+             "\"project\":\"deep-proj\",\"direction\":\"inbound\",\"format\":\"json\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    yyjson_doc *doc = yyjson_read(txt, strlen(txt), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "callers_total")), 4);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(root, "depth_frontier")), "limited");
+    yyjson_val *tok_val = yyjson_obj_get(root, "deepen_cursor");
+    ASSERT_NOT_NULL(tok_val);
+    ASSERT_NOT_NULL(strstr(yyjson_get_str(tok_val), "c2.i."));
+    ASSERT_NOT_NULL(yyjson_obj_get(root, "depth_frontier_note"));
+    const char *deepen_token = yyjson_get_str(tok_val);
+    ASSERT_NOT_NULL(deepen_token);
+    char token[192];
+    snprintf(token, sizeof(token), "%s", deepen_token);
+    yyjson_doc_free(doc);
+    free(txt);
+    free(resp);
+
+    /* Deepen pull with a NARROWED depth argument: the cursor's depth (4) is
+     * authoritative, the argument is ignored (deeper-only). Exactly-once:
+     * tier0 rows are not re-emitted, only the hop-4 row is new. */
+    char args_buf[512];
+    snprintf(args_buf, sizeof(args_buf),
+             "{\"jsonrpc\":\"2.0\",\"id\":932,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"anchor\","
+             "\"project\":\"deep-proj\",\"direction\":\"inbound\",\"depth\":1,"
+             "\"cursor\":\"%s\"}}}",
+             token);
+    resp = cbm_mcp_server_handle(srv, args_buf);
+    ASSERT_NOT_NULL(resp);
+    txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "callers_total: 5")); /* the depth-4 set, not the narrowed one */
+    ASSERT_NOT_NULL(strstr(txt, "deep_d1"));          /* the new tier row */
+    ASSERT_NULL(strstr(txt, "caller_a1"));            /* tier0 rows: not duplicated */
+    ASSERT_NULL(strstr(txt, "caller_a2"));
+    ASSERT_NULL(strstr(txt, "mid_b1"));
+    ASSERT_NULL(strstr(txt, "deep_c1"));
+    ASSERT_NOT_NULL(strstr(txt, "depth_frontier: expanded"));
+    ASSERT_NULL(strstr(txt, "deepen_cursor")); /* nothing deeper: no mint */
+    free(txt);
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* c1/c2 accept-reject matrix: c1 identity still includes depth (narrowing a
+ * replayed c1 fails loudly); c2 identity excludes depth (a narrowed depth
+ * argument cannot sneak past the hash — the pull stays at the cursor's
+ * depth); any other param change invalidates both. */
+TEST(tool_trace_path_cursor_generation_matrix) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "deep-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/deep");
+
+    int64_t anchor = 0, a1 = 0, a2 = 0, b1 = 0, c1 = 0, d1 = 0;
+    deep_fixture_add_node(st, proj, "anchor", &anchor);
+    deep_fixture_add_node(st, proj, "caller_a1", &a1);
+    deep_fixture_add_node(st, proj, "caller_a2", &a2);
+    deep_fixture_add_node(st, proj, "mid_b1", &b1);
+    deep_fixture_add_node(st, proj, "deep_c1", &c1);
+    deep_fixture_add_node(st, proj, "deep_d1", &d1);
+    (void)a2;
+    (void)b1;
+    (void)c1;
+    (void)d1;
+    cbm_edge_t edges[] = {
+        {.project = proj, .source_id = a1, .target_id = anchor, .type = "CALLS"},
+        {.project = proj, .source_id = a2, .target_id = anchor, .type = "CALLS"},
+        {.project = proj, .source_id = b1, .target_id = a1, .type = "CALLS"},
+        {.project = proj, .source_id = c1, .target_id = b1, .type = "CALLS"},
+        {.project = proj, .source_id = d1, .target_id = c1, .type = "CALLS"},
+    };
+    for (size_t e = 0; e < sizeof(edges) / sizeof(edges[0]); e++) {
+        ASSERT_GT(cbm_store_insert_edge(st, &edges[e]), 0);
+    }
+
+    /* Flow A: tier0 with limit=1 -> one row, BOTH a c1 pagination cursor and
+     * a c2 deepen cursor minted. */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":941,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"anchor\","
+             "\"project\":\"deep-proj\",\"direction\":\"inbound\",\"limit\":1}}}");
+    ASSERT_NOT_NULL(resp);
+    char *txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "truncated: true"));
+    const char *c1_next = strstr(txt, "next: c1.");
+    ASSERT_NOT_NULL(c1_next);
+    const char *c2_deepen = strstr(txt, "deepen_cursor: c2.");
+    ASSERT_NOT_NULL(c2_deepen);
+    char tok_c1[192] = {0};
+    char tok_c2[192] = {0};
+    ASSERT_EQ(sscanf(c1_next, "next: %190s", tok_c1), 1);
+    ASSERT_EQ(sscanf(c2_deepen, "deepen_cursor: %190s", tok_c2), 1);
+    free(txt);
+    free(resp);
+
+    /* Flow B: replaying the c1 cursor with a changed depth must fail loudly
+     * — depth is part of the c1 identity. */
+    char args_buf[640];
+    snprintf(args_buf, sizeof(args_buf),
+             "{\"jsonrpc\":\"2.0\",\"id\":942,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"anchor\","
+             "\"project\":\"deep-proj\",\"direction\":\"inbound\",\"limit\":1,\"depth\":9,"
+             "\"cursor\":\"%s\"}}}",
+             tok_c1);
+    resp = cbm_mcp_server_handle(srv, args_buf);
+    ASSERT_NOT_NULL(resp);
+    txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "cursor_params_mismatch"));
+    free(txt);
+    free(resp);
+
+    /* Flow C: the c2 cursor accepts the narrowed depth argument and IGNORES
+     * it — the pull runs at the cursor's depth (hop-1 rows remain in the
+     * set, so row 2 is caller_a2). */
+    snprintf(args_buf, sizeof(args_buf),
+             "{\"jsonrpc\":\"2.0\",\"id\":943,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"anchor\","
+             "\"project\":\"deep-proj\",\"direction\":\"inbound\",\"limit\":1,\"depth\":1,"
+             "\"cursor\":\"%s\"}}}",
+             tok_c2);
+    resp = cbm_mcp_server_handle(srv, args_buf);
+    ASSERT_NOT_NULL(resp);
+    txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "caller_a2"));
+    free(txt);
+    free(resp);
+
+    /* Flow D: any other parameter change still invalidates the c2 cursor. */
+    snprintf(args_buf, sizeof(args_buf),
+             "{\"jsonrpc\":\"2.0\",\"id\":944,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"anchor\","
+             "\"project\":\"deep-proj\",\"direction\":\"inbound\",\"limit\":1,"
+             "\"include_tests\":true,\"cursor\":\"%s\"}}}",
+             tok_c2);
+    resp = cbm_mcp_server_handle(srv, args_buf);
+    ASSERT_NOT_NULL(resp);
+    txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "cursor_params_mismatch"));
+    free(txt);
+    free(resp);
+
+    /* Flow E: a tampered c2 token (depth 0 is below the valid floor) is
+     * rejected outright. */
+    snprintf(args_buf, sizeof(args_buf),
+             "{\"jsonrpc\":\"2.0\",\"id\":945,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"anchor\","
+             "\"project\":\"deep-proj\",\"direction\":\"inbound\",\"limit\":1,"
+             "\"cursor\":\"c2.i.0.%s\"}}}",
+             tok_c2 + 7);
+    resp = cbm_mcp_server_handle(srv, args_buf);
+    ASSERT_NOT_NULL(resp);
+    txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "invalid_cursor"));
+    free(txt);
+    free(resp);
 
     cbm_mcp_server_free(srv);
     PASS();
@@ -21163,6 +21392,8 @@ SUITE(mcp) {
     RUN_TEST(tool_detect_changes_honesty_note_in_both_formats);
     RUN_TEST(cache_sweep_prunes_skip_logs_worker_temp_and_scratch);
     RUN_TEST(index_status_maintenance_accounts_fts_and_lsp_orphans);
+    RUN_TEST(tool_trace_path_deepen_cursor_pulls_next_tier);
+    RUN_TEST(tool_trace_path_cursor_generation_matrix);
     RUN_TEST(tool_detect_changes_finds_nested_untracked_file_and_impact_seed);
     RUN_TEST(tool_detect_changes_escapes_newline_path_in_tree_and_round_trips_json);
     RUN_TEST(tool_detect_changes_staged_rename_uses_exact_destination_record);

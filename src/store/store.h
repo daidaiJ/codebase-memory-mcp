@@ -758,6 +758,19 @@ int cbm_store_bfs_multi(cbm_store_t *s, const int64_t *seed_ids, int seed_count,
                         int max_depth, int max_results, cbm_traverse_result_t *out,
                         bool *truncated);
 
+/* Depth-frontier probe (fork issue #9): does ANY frontier node have a
+ * traversal edge to a node outside the materialized set? Because the
+ * depth-bounded BFS materializes every node within `depth` when it did not
+ * saturate, an edge from the max-hop frontier to a non-materialized node
+ * means a deeper tier exists. Bounded by construction — the EXISTS stops at
+ * the first hit; the id sets ride in temp tables (bfs_seeds pattern).
+ * Returns CBM_STORE_OK with *more_out, else CBM_STORE_ERR (caller decides
+ * how to answer; a failed probe must never be read as "expanded"). */
+int cbm_store_frontier_has_more(cbm_store_t *s, const char *direction,
+                                const char **edge_types, int edge_type_count,
+                                const int64_t *frontier_ids, int frontier_count,
+                                const int64_t *known_ids, int known_count, bool *more_out);
+
 /* Free a traverse result's allocated memory. */
 void cbm_store_traverse_free(cbm_traverse_result_t *out);
 

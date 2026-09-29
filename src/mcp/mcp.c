@@ -8715,7 +8715,16 @@ static int bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int 
  * full reachable-set cost regardless of LIMIT, so a page costs what one
  * call costs today) and skips to the watermark. The generation stamp turns
  * every post-reindex cursor into a loud, actionable error — node ids are
- * never reused across rebuilds, so silently resuming would be wrong. */
+ * never reused across rebuilds, so silently resuming would be wrong.
+ *
+ * c2 (fork issue #9) adds delayed depth deepening:
+ * "c2.<leg>.<depth>.<generation>.<qhash>.<hop>.<id>". Depth moved OUT of the
+ * params hash and into the token as a plaintext field, so pulling the next
+ * tier does not invalidate the cursor identity. A c2 cursor with hop=0/id=0
+ * is a fresh anchor (the previous tier had no rows): resume from the start.
+ * Depth is deeper-only by construction: the server mints depth+1 and, on a
+ * c2 replay, IGNORES the depth argument — a narrowed depth can never sneak
+ * past the (depthless) hash. */
 
 static uint64_t cursor_fnv1a64(const char *s, uint64_t h) {
     while (s && *s) {
@@ -8731,14 +8740,17 @@ typedef struct {
     uint64_t qhash;      /* canonical-params hash */
     int hop;             /* watermark: last emitted row */
     int64_t node_id;
+    int depth;   /* c2 only: target depth of this pull */
+    bool deepen; /* c2 version marker */
 } trace_cursor_t;
 
 /* Hash the params that define the traversal identity. A cursor replayed with
  * different params must fail loudly, never silently mis-skip. */
-static uint64_t trace_params_hash(const char *project, const char *func_name, const char *direction,
-                                  const char *mode, const char *param_name, int depth,
-                                  bool include_tests, bool risk_labels, bool include_evidence,
-                                  int limit, const char *args) {
+static uint64_t trace_params_hash_ex(const char *project, const char *func_name,
+                                     const char *direction, const char *mode,
+                                     const char *param_name, bool include_tests, bool risk_labels,
+                                     bool include_evidence, int limit, const char *args, int depth,
+                                     bool hash_depth) {
     uint64_t h = 0xcbf29ce484222325ULL;
     h = cursor_fnv1a64(project ? project : "", h);
     h = cursor_fnv1a64("|", h);
@@ -8753,9 +8765,12 @@ static uint64_t trace_params_hash(const char *project, const char *func_name, co
     /* Output budget changes only how many whole rows fit after the exact
      * watermark; it does not change graph identity. Excluding it lets a caller
      * follow a hard-floor instruction and raise max_output_tokens without
-     * invalidating the cursor that reached that page. */
-    snprintf(nums, sizeof(nums), "|%d|%d|%d|%d|%d", depth, include_tests ? 1 : 0,
-             risk_labels ? 1 : 0, include_evidence ? 1 : 0, limit);
+     * invalidating the cursor that reached that page. Depth is part of the c1
+     * identity; c2 (deepen) carries it in the token instead, so the hash
+     * excludes it there and a deepened pull cannot be narrowed past the
+     * watermark by lowering the depth argument. */
+    snprintf(nums, sizeof(nums), "|%d|%d|%d|%d|%d", hash_depth ? depth : 0,
+             include_tests ? 1 : 0, risk_labels ? 1 : 0, include_evidence ? 1 : 0, limit);
     h = cursor_fnv1a64(nums, h);
 
     /* Explicit edge types define the traversed graph. Omitting them from the
@@ -8781,19 +8796,57 @@ static uint64_t trace_params_hash(const char *project, const char *func_name, co
     return h;
 }
 
+static uint64_t trace_params_hash(const char *project, const char *func_name, const char *direction,
+                                  const char *mode, const char *param_name, int depth,
+                                  bool include_tests, bool risk_labels, bool include_evidence,
+                                  int limit, const char *args) {
+    return trace_params_hash_ex(project, func_name, direction, mode, param_name, include_tests,
+                                risk_labels, include_evidence, limit, args, depth, true);
+}
+
+static uint64_t trace_params_hash_depthless(const char *project, const char *func_name,
+                                            const char *direction, const char *mode,
+                                            const char *param_name, bool include_tests,
+                                            bool risk_labels, bool include_evidence, int limit,
+                                            const char *args) {
+    return trace_params_hash_ex(project, func_name, direction, mode, param_name, include_tests,
+                                risk_labels, include_evidence, limit, args, 0, false);
+}
+
 static void trace_cursor_encode(const trace_cursor_t *c, char *buf, size_t bufsz) {
-    snprintf(buf, bufsz, "c1.%c.%s.%016llx.%d.%lld", c->leg, c->generation,
-             (unsigned long long)c->qhash, c->hop, (long long)c->node_id);
+    if (c->deepen) {
+        snprintf(buf, bufsz, "c2.%c.%d.%s.%016llx.%d.%lld", c->leg, c->depth, c->generation,
+                 (unsigned long long)c->qhash, c->hop, (long long)c->node_id);
+    } else {
+        snprintf(buf, bufsz, "c1.%c.%s.%016llx.%d.%lld", c->leg, c->generation,
+                 (unsigned long long)c->qhash, c->hop, (long long)c->node_id);
+    }
 }
 
 /* Decode + validate. Returns NULL on success, else a static teaching error. */
 static const char *trace_cursor_decode(const char *token, const char *current_generation,
                                        uint64_t expected_qhash, trace_cursor_t *out) {
     memset(out, 0, sizeof(*out));
-    if (!token || strncmp(token, "c1.", 3) != 0) {
+    if (!token) {
+        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
+    }
+    bool deepen = strncmp(token, "c2.", 3) == 0;
+    if (!deepen && strncmp(token, "c1.", 3) != 0) {
         return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
     }
     const char *p = token + 3;
+    if (deepen) {
+        errno = 0;
+        char *depth_end = NULL;
+        long parsed_depth = strtol(p, &depth_end, 10);
+        if (depth_end == p || errno == ERANGE || depth_end == NULL || *depth_end != '.' ||
+            parsed_depth < 1 || parsed_depth > INT_MAX) {
+            return "invalid_cursor: unrecognized token — re-run the original query without "
+                   "'cursor'";
+        }
+        out->depth = (int)parsed_depth;
+        p = depth_end + 1;
+    }
     if ((*p != 'o' && *p != 'i') || p[1] != '.') {
         return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
     }
@@ -8827,18 +8880,25 @@ static const char *trace_cursor_decode(const char *token, const char *current_ge
     errno = 0;
     long parsed_hop = hop_end ? strtol(hop_start, &parsed_end, 10) : -1;
     if (!hop_end || hop_end == hop_start || errno == ERANGE || parsed_end != hop_end ||
-        parsed_hop < 1 || parsed_hop > INT_MAX) {
+        parsed_hop < (deepen ? 0 : 1) || parsed_hop > INT_MAX) {
         return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
     }
     const char *node_start = hop_end + 1;
     errno = 0;
     long long nid = strtoll(node_start, &parsed_end, 10);
-    if (node_start == parsed_end || errno == ERANGE || *parsed_end != '\0' || nid <= 0) {
+    /* hop=0 is the c2 fresh anchor (previous tier had no rows): exactly
+     * (hop 0, id 0). Any real watermark needs a positive node id. */
+    bool fresh_anchor = deepen && parsed_hop == 0;
+    if (node_start == parsed_end || errno == ERANGE || *parsed_end != '\0') {
+        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
+    }
+    if (fresh_anchor ? (nid != 0) : (nid <= 0)) {
         return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
     }
     out->hop = (int)parsed_hop;
     out->qhash = qh;
     out->node_id = nid;
+    out->deepen = deepen;
     if (out->qhash != expected_qhash) {
         return "cursor_params_mismatch: this cursor was issued for different arguments — "
                "pass the cursor back with ALL other arguments identical";
@@ -9221,6 +9281,31 @@ static int clamp_mcp_depth(int depth, const char *tool) {
     return depth;
 }
 
+/* Max-hop suffix of a canonical (hop,id) ordered leg — the depth frontier.
+ * Returns a malloc'd id array (caller frees) and its size; NULL when the leg
+ * is empty. */
+static int64_t *trace_frontier_ids(const cbm_traverse_result_t *tr, int *out_count) {
+    *out_count = 0;
+    if (!tr || tr->visited_count <= 0) {
+        return NULL;
+    }
+    int max_hop = tr->visited[tr->visited_count - 1].hop;
+    int start = tr->visited_count;
+    while (start > 0 && tr->visited[start - 1].hop == max_hop) {
+        start--;
+    }
+    int count = tr->visited_count - start;
+    int64_t *ids = (int64_t *)malloc((size_t)count * sizeof(int64_t));
+    if (!ids) {
+        return NULL;
+    }
+    for (int i = 0; i < count; i++) {
+        ids[i] = tr->visited[start + i].node.id;
+    }
+    *out_count = count;
+    return ids;
+}
+
 static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     char *func_name = cbm_mcp_get_string_arg(args, "function_name");
     char *project = get_project_arg(args);
@@ -9313,9 +9398,18 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
             true);
     }
     if (cursor_arg && cursor_arg[0]) {
-        uint64_t qh = trace_params_hash(project, func_name, direction ? direction : "both", mode,
-                                        param_name, depth, include_tests, risk_labels,
-                                        include_evidence, trace_limit, args);
+        /* c2 (deepen) cursors own their depth: the identity hash excludes it
+         * and the replayed depth argument is ignored — deeper-only is
+         * enforced by construction, never by caller discipline. */
+        bool deepen_cursor = strncmp(cursor_arg, "c2.", 3) == 0;
+        uint64_t qh = deepen_cursor
+                          ? trace_params_hash_depthless(project, func_name,
+                                                        direction ? direction : "both", mode,
+                                                        param_name, include_tests, risk_labels,
+                                                        include_evidence, trace_limit, args)
+                          : trace_params_hash(project, func_name, direction ? direction : "both",
+                                              mode, param_name, depth, include_tests, risk_labels,
+                                              include_evidence, trace_limit, args);
         const char *cerr = trace_cursor_decode(cursor_arg, generation, qh, &cur);
         if (cerr) {
             free(cursor_arg);
@@ -9327,6 +9421,9 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
             return cbm_mcp_text_result(cerr, true);
         }
         have_cursor = true;
+        if (deepen_cursor) {
+            depth = clamp_mcp_depth(cur.depth, "trace_call_path");
+        }
     }
     free(cursor_arg);
     if (!direction) {
@@ -9488,13 +9585,70 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         trace_filter_test_rows(&tr_in);
     }
 
+    /* Depth-frontier probe (fork #9): the CTE materialized every node within
+     * `depth` (when it did not saturate), so a max-hop node with a traversal
+     * edge to a non-materialized node means a deeper tier exists. Computed
+     * once — a property of the graph, independent of paging and of the
+     * output-budget render loop below. A failed probe omits the field
+     * entirely: "probe unavailable" must not read as "expanded". */
+    bool have_frontier = false;
+    bool depth_frontier_limited = false;
+    if (!tr_out.truncated && !tr_in.truncated) {
+        int known_cap = node_count + tr_out.visited_count + tr_in.visited_count;
+        int64_t *known =
+            (int64_t *)malloc((size_t)(known_cap > 0 ? known_cap : 1) * sizeof(int64_t));
+        if (known) {
+            int known_count = 0;
+            for (int i = 0; i < node_count; i++) {
+                known[known_count++] = nodes[i].id;
+            }
+            for (int i = 0; i < tr_out.visited_count; i++) {
+                known[known_count++] = tr_out.visited[i].node.id;
+            }
+            for (int i = 0; i < tr_in.visited_count; i++) {
+                known[known_count++] = tr_in.visited[i].node.id;
+            }
+            have_frontier = true;
+            const struct {
+                bool active;
+                const char *direction;
+                const cbm_traverse_result_t *tr;
+            } legs[] = {
+                {do_outbound, "outbound", &tr_out},
+                {do_inbound, "inbound", &tr_in},
+            };
+            for (int l = 0; l < 2 && have_frontier; l++) {
+                if (!legs[l].active) {
+                    continue;
+                }
+                int frontier_count = 0;
+                int64_t *frontier = trace_frontier_ids(legs[l].tr, &frontier_count);
+                if (!frontier) {
+                    continue; /* empty leg: no frontier, nothing to deepen */
+                }
+                bool more = false;
+                if (cbm_store_frontier_has_more(store, legs[l].direction, edge_types,
+                                                edge_type_count, frontier, frontier_count, known,
+                                                known_count, &more) == CBM_STORE_OK) {
+                    if (more) {
+                        depth_frontier_limited = true;
+                    }
+                } else {
+                    have_frontier = false; /* probe failed: omit, never guess */
+                }
+                free(frontier);
+            }
+        }
+        free(known);
+    }
+
     /* Page windows in canonical (hop,id) order. Legs drain in a fixed order
      * (callees, then callers); a resume cursor starts its leg at the row
      * after the watermark, and a page that finishes one leg with budget to
      * spare continues into the next. */
     int out_start = 0;
     int in_start = 0;
-    if (have_cursor) {
+    if (have_cursor && cur.hop > 0) {
         int watermark_next = CBM_NOT_FOUND;
         if (cur.leg == 'o') {
             watermark_next = trace_watermark_next_index(&tr_out, cur.hop, cur.node_id);
@@ -9569,9 +9723,16 @@ render_trace_output:;
     if (more_rows && !gen_legacy) {
         trace_cursor_t nc = {0};
         snprintf(nc.generation, sizeof(nc.generation), "%s", generation);
-        nc.qhash =
-            trace_params_hash(project, func_name, direction, mode, param_name, depth, include_tests,
-                              risk_labels, include_evidence, trace_limit, args);
+        /* A deepened pull keeps minting c2 (depth rides in the token); fresh
+         * and c1 pulls stay c1 with the depth in the identity hash. */
+        nc.deepen = cur.deepen;
+        nc.depth = depth;
+        nc.qhash = nc.deepen ? trace_params_hash_depthless(project, func_name, direction, mode,
+                                                           param_name, include_tests, risk_labels,
+                                                           include_evidence, trace_limit, args)
+                             : trace_params_hash(project, func_name, direction, mode, param_name,
+                                                 depth, include_tests, risk_labels,
+                                                 include_evidence, trace_limit, args);
         /* The watermark is the last row ACTUALLY emitted, not the leg that
          * happens to have additional rows. At an exact outbound page boundary
          * inbound may be pending with zero emitted rows. */
@@ -9587,6 +9748,34 @@ render_trace_output:;
         if (in_len > 0 || out_len > 0) {
             trace_cursor_encode(&nc, next_tok, sizeof(next_tok));
         }
+    }
+
+    /* Deepen cursor (fork #9): mint only when the probe actually saw a deeper
+     * tier, the traversal did not saturate, and the depth ceiling leaves
+     * room. hop=0/id=0 encodes a fresh anchor (previous tier had no rows) —
+     * the next pull starts from the top of the deeper set, and the watermark
+     * guarantees tier0 rows are never emitted twice. */
+    char deepen_tok[192] = "";
+    if (have_frontier && depth_frontier_limited && !gen_legacy && depth < cbm_mcp_max_depth()) {
+        trace_cursor_t dc = {0};
+        snprintf(dc.generation, sizeof(dc.generation), "%s", generation);
+        dc.deepen = true;
+        dc.depth = depth + 1;
+        dc.qhash = trace_params_hash_depthless(project, func_name, direction, mode, param_name,
+                                               include_tests, risk_labels, include_evidence,
+                                               trace_limit, args);
+        if (in_len > 0) {
+            dc.leg = 'i';
+            dc.hop = tr_in.visited[in_start + in_len - 1].hop;
+            dc.node_id = tr_in.visited[in_start + in_len - 1].node.id;
+        } else if (out_len > 0) {
+            dc.leg = 'o';
+            dc.hop = tr_out.visited[out_start + out_len - 1].hop;
+            dc.node_id = tr_out.visited[out_start + out_len - 1].node.id;
+        } else {
+            dc.leg = do_inbound ? 'i' : 'o'; /* fresh anchor; leg is nominal */
+        }
+        trace_cursor_encode(&dc, deepen_tok, sizeof(deepen_tok));
     }
 
     /* Window views: visited offset + count; the full edges array stays
@@ -9666,6 +9855,24 @@ render_trace_output:;
                                            &in_edge_ctx);
             }
         }
+        if (have_frontier) {
+            cbm_tree_scalar_str(&sb, "depth_frontier",
+                                depth_frontier_limited ? "limited" : "expanded");
+            if (depth_frontier_limited) {
+                if (deepen_tok[0]) {
+                    cbm_tree_scalar_str(&sb, "deepen_cursor", deepen_tok);
+                    cbm_tree_scalar_str(
+                        &sb, "depth_frontier_note",
+                        "deeper tiers exist — re-call with 'cursor' set to deepen_cursor and ALL "
+                        "other arguments identical; each pull adds one depth tier");
+                } else {
+                    cbm_tree_scalar_str(
+                        &sb, "depth_frontier_note",
+                        "deeper tiers exist but the depth ceiling is reached — re-call with a "
+                        "higher 'depth'");
+                }
+            }
+        }
         if (trace_truncated) {
             cbm_tree_scalar_bool(&sb, "truncated", true);
             cbm_tree_scalar_bool(&sb, "has_more", more_rows);
@@ -9741,6 +9948,24 @@ render_trace_output:;
                 bfs_to_tree_json(doc, &view_in, risk_labels && emit_optional_fields, include_tests,
                                  data_flow && emit_optional_fields,
                                  include_evidence && emit_optional_fields, &in_edge_ctx));
+        }
+        if (have_frontier) {
+            yyjson_mut_obj_add_str(doc, root, "depth_frontier",
+                                   depth_frontier_limited ? "limited" : "expanded");
+            if (depth_frontier_limited) {
+                if (deepen_tok[0]) {
+                    yyjson_mut_obj_add_strcpy(doc, root, "deepen_cursor", deepen_tok);
+                    yyjson_mut_obj_add_str(
+                        doc, root, "depth_frontier_note",
+                        "deeper tiers exist — re-call with 'cursor' set to deepen_cursor and ALL "
+                        "other arguments identical; each pull adds one depth tier");
+                } else {
+                    yyjson_mut_obj_add_str(
+                        doc, root, "depth_frontier_note",
+                        "deeper tiers exist but the depth ceiling is reached — re-call with a "
+                        "higher 'depth'");
+                }
+            }
         }
         if (trace_truncated) {
             yyjson_mut_obj_add_bool(doc, root, "truncated", true);

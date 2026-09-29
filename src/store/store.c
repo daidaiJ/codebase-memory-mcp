@@ -6024,6 +6024,92 @@ int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const
                      false, -1, out);
 }
 
+int cbm_store_frontier_has_more(cbm_store_t *s, const char *direction,
+                                const char **edge_types, int edge_type_count,
+                                const int64_t *frontier_ids, int frontier_count,
+                                const int64_t *known_ids, int known_count, bool *more_out) {
+    if (more_out) {
+        *more_out = false;
+    }
+    if (!s || !s->db || !more_out || !frontier_ids || frontier_count <= 0 || known_count < 0 ||
+        (known_count > 0 && !known_ids)) {
+        return CBM_STORE_ERR;
+    }
+    if (sqlite3_exec(s->db,
+                     "CREATE TEMP TABLE IF NOT EXISTS probe_frontier (id INTEGER PRIMARY KEY);"
+                     "DELETE FROM probe_frontier;"
+                     "CREATE TEMP TABLE IF NOT EXISTS probe_known (id INTEGER PRIMARY KEY);"
+                     "DELETE FROM probe_known;",
+                     NULL, NULL, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "frontier probe tables");
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *ins = NULL;
+    if (sqlite3_prepare_v2(s->db, "INSERT OR IGNORE INTO probe_frontier(id) VALUES (?1)",
+                           CBM_NOT_FOUND, &ins, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "frontier probe insert");
+        return CBM_STORE_ERR;
+    }
+    for (int i = 0; i < frontier_count; i++) {
+        sqlite3_reset(ins);
+        sqlite3_bind_int64(ins, SKIP_ONE, frontier_ids[i]);
+        (void)sqlite3_step(ins);
+    }
+    sqlite3_finalize(ins);
+    if (sqlite3_prepare_v2(s->db, "INSERT OR IGNORE INTO probe_known(id) VALUES (?1)",
+                           CBM_NOT_FOUND, &ins, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "frontier probe insert");
+        return CBM_STORE_ERR;
+    }
+    for (int i = 0; i < known_count; i++) {
+        sqlite3_reset(ins);
+        sqlite3_bind_int64(ins, SKIP_ONE, known_ids[i]);
+        (void)sqlite3_step(ins);
+    }
+    sqlite3_finalize(ins);
+
+    char types_clause[CBM_SZ_512];
+    bfs_build_types_clause(edge_type_count, types_clause, (int)sizeof(types_clause));
+    bool is_inbound = direction && strcmp(direction, "inbound") == 0;
+    char sql[CBM_SZ_1K];
+    snprintf(sql, sizeof(sql),
+             "SELECT 1 FROM probe_frontier f"
+             " JOIN edges e ON %s"
+             " WHERE e.type IN (%s) AND %s NOT IN (SELECT id FROM probe_known)"
+             " LIMIT 1;",
+             is_inbound ? "e.target_id = f.id" : "e.source_id = f.id", types_clause,
+             is_inbound ? "e.source_id" : "e.target_id");
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "frontier probe prepare");
+        return CBM_STORE_ERR;
+    }
+    if (edge_type_count > 0) {
+        for (int i = 0; i < edge_type_count; i++) {
+            bind_text(stmt, i + SKIP_ONE, edge_types[i]);
+        }
+    } else {
+        bind_text(stmt, SKIP_ONE, "CALLS");
+    }
+    bool more = false;
+    int rc = CBM_STORE_ERR;
+    int step_rc = sqlite3_step(stmt);
+    if (step_rc == SQLITE_ROW) {
+        more = true;
+        rc = CBM_STORE_OK;
+    } else if (step_rc == SQLITE_DONE) {
+        rc = CBM_STORE_OK; /* no deeper tier */
+    } else {
+        store_set_error_sqlite(s, "frontier probe step");
+    }
+    sqlite3_finalize(stmt);
+    if (rc == CBM_STORE_OK) {
+        *more_out = more;
+    }
+    return rc;
+}
+
 int cbm_store_bfs_trail(cbm_store_t *s, int64_t start_id, const char *direction,
                         const char **edge_types, int edge_type_count, int max_depth,
                         int max_results, cbm_traverse_result_t *out) {

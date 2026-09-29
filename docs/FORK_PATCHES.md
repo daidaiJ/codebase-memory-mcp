@@ -239,6 +239,58 @@ first; parameterize on real usage feedback).
   retention mechanism for real — delete-by-file leaves the FTS row, churn
   accumulates it — and pins counts, orphan probe and rebuild recommendation).
 
+## 8. trace_path depth frontier + deepen cursor (fork issue #9)
+
+The recursive CTE enumerates the full depth-bounded reachable set regardless
+of LIMIT, so the only way to save a deep traversal is not to run it — and the
+only honest way to do THAT is to tell the caller a deeper tier exists and let
+them pull it. trace_path responses now distinguish "the frontier was fully
+expanded" from "there is more beyond the depth cap":
+
+- `depth_frontier: "expanded" | "limited"` — when neither leg saturated the
+  5000-node engine ceiling, a bounded EXISTS probe (`cbm_store_frontier_has_more`,
+  temp-table id sets, LIMIT 1) checks whether any max-hop node has a
+  traversal edge to a node outside the materialized set. A failed probe
+  omits the field — "probe unavailable" must never read as "expanded".
+- `deepen_cursor` — a c2 token, minted only when the frontier is limited,
+  the engine did not saturate, and the depth ceiling leaves room, with the
+  teaching note (`depth_frontier_note`) telling the agent to pass it back as
+  `cursor`. Depth pulls are agent-driven PULLS — no background crawling, no
+  query deadline; each pull gets its own fresh page/row budget.
+
+Cursor generations (c1 unchanged and still accepted):
+
+- c1: `c1.<leg>.<generation>.<qhash>.<hop>.<id>` — depth part of the identity
+  hash, exactly as before.
+- c2: `c2.<leg>.<depth>.<generation>.<qhash>.<hop>.<id>` — depth moved OUT of
+  the hash into the token, so pulling tier N+1 does not invalidate the
+  identity. Deeper-only is enforced by CONSTRUCTION: the server mints
+  depth+1 and, on a c2 replay, ignores the depth argument — a narrowed depth
+  can never sneak past the depthless hash. Every other param still
+  invalidates. hop=0/id=0 is a fresh anchor (previous tier had no rows;
+  decode accepts it, the handler resumes from the top — never produced by a
+  plain mint today, kept for the 0-row chain case). Exactly-once carries
+  over: the (hop,id) watermark guarantees tier0 rows are never emitted twice.
+  Generation staleness (`stale_cursor`) unchanged for both generations.
+- Deepened pulls keep minting c2 pagination cursors; fresh and c1 pulls
+  keep minting c1.
+
+- `src/store/store.c/.h` — `cbm_store_frontier_has_more` (bounded EXISTS,
+  temp tables `probe_frontier`/`probe_known`).
+- `src/mcp/mcp.c` — `trace_params_hash_ex` (depth-optional), c2 encode/decode,
+  frontier probe, deepen mint, both emitters.
+- Tests: `tool_trace_path_deepen_cursor_pulls_next_tier` (4-tier fixture:
+  tier0 limited, deepened pull honors the cursor's depth over a narrowed
+  depth argument, tier0 rows not repeated, expanded at the end) and
+  `tool_trace_path_cursor_generation_matrix` (c1 depth-change rejects; c2
+  depth-change accepted-and-ignored; c2 other-param change rejects; tampered
+  c2 rejects).
+
+Known skew: with `include_tests=false`, nodes hidden by the test filter are
+absent from the probe's known set — a chain THROUGH a test file can report
+`limited` and mint a cursor whose pull yields no new visible rows. The chain
+still terminates at the depth ceiling; the totals and watermark stay honest.
+
 ## Verification notes
 
 - `tests/test_mem.c` updated to the capped-default semantics (incl. new
