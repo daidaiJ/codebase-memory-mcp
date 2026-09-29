@@ -476,8 +476,12 @@ diagnostics=full 约 5.6KB，只读零信任风险，描述已是触发语形态
 
 **不升面的候选（评估记录，2026-09-30）**：`trace_path`（baseline 特许 +
 instructions 委托本地工具；一跳 callers 经 Cypher 实测可解，§6 健康摘要修的是
-安全而非升面）、`detect_changes`（#2128 dead-verdict + #480 direction 静默空
-未修，修复是升面前提）、`index_status` / `check_index_coverage`（新鲜度带外
+安全而非升面）、`detect_changes`（#480 direction 静默空已修：上游 commit
+`60390aff` 在基线内，`mcp.c` 对非法 direction 显式报错并有 `invalid_rejected`
+断言 pin；仍未决的是 #2128 dead-verdict 家族——CALLS 边是解析启发式，
+`impacted=0` 的假阴性是图谱固有属性，真修复需 bfs_multi 返回边的 store API
+扩展，成本不成比例。升面前提 = per-symbol 证据落地，另需处理 caveat 文本
+指向面外工具 trace_path 的自相矛盾）、`index_status` / `check_index_coverage`（新鲜度带外
 维护，instructions 已教 out-of-band 路径）、`search_code` / `get_code_snippet` /
 `get_file_outline`（与客户端 Read/grep 重叠）。后续候选（非工具）：
 query_graph 未知属性 fail-loud 校验——同一 silent-empty 家族（#480 同型），
