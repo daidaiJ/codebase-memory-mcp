@@ -94,3 +94,6 @@ soak-results-query-leak/
 # wiki knowledge dirs (managed by wiki CLI)
 /wiki
 /issues
+
+# handoff (session task handoff, per my-skills/context-standards/handoff)
+/.handoff/

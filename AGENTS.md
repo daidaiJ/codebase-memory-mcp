@@ -103,3 +103,16 @@ gcc -fsyntax-only -std=c11 -Isrc -Ivendored -Ivendored/sqlite3 \
 2. **上游 rebase 后**：重点核对 `application.c` 的 profile 边界校验、`CONFIG_KEYS[]` 表、`mcp_tool_allowed` 三处是否被上游改动冲掉
 3. **不要「顺手」恢复任何上游默认**（auto_watch=true / log=info / UI 自启 / 无预算上限）——那是被 fork issue #3 明确否决的设计
 4. **新增 MCP 工具时**：注册进 `TOOLS[]` 后必须同时决定它进不进 `minimal_tools[]`，并更新 FORK_PATCHES 的对照证据
+
+## 🔄 Handoff 摘要
+
+### minimal-swap-t2-t7 — in-progress
+
+- **当前状态：** in-progress（T1 已提交且 commit 内容复核通过；污染期 T2 残留已执行 `git checkout -- src/mcp/mcp.c` 丢弃；T2-T7 + Windows 构建说明未开始）
+- **关键证据：** T1 commit `7399e8f0`（minimal 面换血，git 双通道验证 + 新会话 `git show` 内容复核通过）；上一会话环境伪造事故已排查定位（见 handoff §4）
+- **验收标准：** T2-T7 每 Ticket 独立 commit + 维护者本机测试全绿 + 构建说明成文（agent 不跑测试）
+- **详情指针：** [`.handoff/minimal-swap-t2-t7.md`](.handoff/minimal-swap-t2-t7.md)（唯一权威任务源仍是 `.plan/spec.md`）
+
+### 未验证事项
+- [ ] 全部代码/测试改动未经过任何构建或测试（agent 不跑，维护者本机验证）
+- [ ] T1 commit 文件内容完整性（新会话用 `git show 7399e8f0` 复核）
