@@ -32,11 +32,13 @@ src/
 ├── daemon/ipc.c        # Windows DACL 硬化检查（win_file_acl_secure）
 ├── foundation/log.c    # 日志（默认级别在 g_log_level 静态初始化处）
 ├── foundation/mem.c    # 内存预算解析（cbm_mem_resolve_budget = 唯一汇聚点）
+├── watcher/watcher.c   # git 轮询 watcher：双轮确认 + 冷却 + freshness（fork issue #10，判定逻辑在纯函数 cbm_watcher_decide_poll）
 └── ui/config.c         # 图谱 UI 配置（ui_enabled，fork 已去自启）
 tests/test_mem.c        # 预算解析测试（fork 语义已同步）
 docs/
 ├── FORK_PATCHES.md     # ★ 补丁清单：动机 + 逐文件修改点（改代码前先读）
 ├── CONFIGURATION.md    # 配置参考（fork 已更新）
+├── BUILD_WINDOWS.md    # Windows 本机构建/测试配方（MSYS2 CLANG64，MSVC 不适用）
 └── UPSTREAM_README.md  # 上游原版 README
 ```
 
@@ -79,6 +81,7 @@ workflow 只保留 `fork-win64.yml`（构建 + tag 发 release）。上游遗产
 | `detect_changes` 非法 direction | 已 fail-loud（上游 commit `60390aff` 修复，fork 基线已含，tests/test_mcp.c 有断言 pin） | 无需再修；rebase 时确认该 teaching error 未被冲掉 |
 | Windows DACL 检查 | fork 默认**跳过**不可信 ACE 遍历；`CBM_DACL_HARDENING=1` 才开回 | 属主校验两种模式都保留，别动它；多用户主机文档要提示开回 |
 | 内存预算 | cap 只封默认分数，显式 env 永远可上调（`default_capped` 标志随之清零） | 改 resolve_budget 时保持这个单语义 |
+| watcher 触发时序 | fork issue #10：脏变更需**两轮**签名相等才索引（HEAD 移动单轮即触发），成功索引后有 30s 冷却（`CBM_WATCH_COOLDOWN_S`，0 关闭）；`index_status` 带 `freshness` 块 | dirty 路径的 watcher 测试都是「stage + confirm」两轮——rebase 时别「简化」回单轮；freshness 锚是聚合口径，禁止 per-file mtime / Branch.head_sha |
 | 守护进程冷启 | ~5s（Windows + DACL + 指纹哈希） | CLI 面的策略拒绝必须在 bootstrap **之前**（run_cli 已前置，别挪到 daemon 执行后） |
 
 ## 快速上手命令
@@ -104,15 +107,15 @@ gcc -fsyntax-only -std=c11 -Isrc -Ivendored -Ivendored/sqlite3 \
 3. **不要「顺手」恢复任何上游默认**（auto_watch=true / log=info / UI 自启 / 无预算上限）——那是被 fork issue #3 明确否决的设计
 4. **新增 MCP 工具时**：注册进 `TOOLS[]` 后必须同时决定它进不进 `minimal_tools[]`，并更新 FORK_PATCHES 的对照证据
 
-## 🔄 Handoff 摘要
+## ✅ Phase 1 + Phase 2 收尾状态（minimal-swap-t2-t7，2026-09-29 完成）
 
-### minimal-swap-t2-t7 — in-progress（约 85%）
-
-- **当前状态：** T2-T6 已完成并各自独立 commit（c9f5bcbf / 3037dd6f / f31f9a87 / 410648ef / da13a3d1）；剩 T7（fork issue #10 惊群防护+freshness）+ Windows 构建说明
-- **关键证据：** 每 Ticket 同步 FORK_PATCHES §5-§8 + tests/test_mcp.c 新测试；T4 顺带修复 T1 遗留的 RUN_TEST 注册断链；开场双跑核验一致、T1 `git show` 复核通过
-- **验收标准：** T7 独立 commit + 维护者本机构建/测试全绿（agent 不跑测试）+ Windows 构建说明成文 + 完成后摘除本摘要块
-- **详情指针：** [`.handoff/minimal-swap-t2-t7.md`](.handoff/minimal-swap-t2-t7.md)（唯一权威任务源仍是 `.plan/spec.md`；tree 标量值加引号、c1/c2 cursor 语义等已踩坑见 handoff §8）
-
-### 未验证事项
-- [ ] T2-T6 全部代码/测试改动未经任何构建或测试（agent 不跑，维护者本机验证；T6 动了 cursor 契约，务必实跑 test_mcp 全量）
-- [ ] T7 与 Windows 构建说明未开始（handoff §6 有 spec 锚点与约束摘录）
+- T0-T7 全部落地，各自独立 commit（T7 = `e02fec1a`，fork issue #10；T2-T6 见
+  `git log` c9f5bcbf..da13a3d1）。Windows 构建说明见 [docs/BUILD_WINDOWS.md](docs/BUILD_WINDOWS.md)。
+- 补丁动机与验证矩阵：`docs/FORK_PATCHES.md` §5-§9 + Verification notes。
+- **唯二未完成项：维护者本机实跑全量构建 + 测试（agent 从不跑测试）。**
+  - 务必实跑 `make -f Makefile.cbm test`（或 `test-par`）；重点 suite：`mcp`
+    （T6 cursor 契约 + T7 freshness 矩阵）、`watcher`（T7 双轮确认/冷却）。
+  - dirty 路径 watcher 测试是「stage + confirm」两轮节奏；首次跑挂了先看
+    FORK_PATCHES §9 与 handoff 文档 §8 的踩坑记录再归因。
+- 历史任务源：[`.handoff/minimal-swap-t2-t7.md`](.handoff/minimal-swap-t2-t7.md)
+  （已标记 done）与 `.plan/spec.md`。
