@@ -8856,6 +8856,15 @@ static const char *trace_cursor_decode(const char *token, const char *current_ge
     }
     const char *p = token + 3;
     if (deepen) {
+        /* The wire order is c2.<leg>.<depth>... (trace_cursor_encode, and the
+         * format comment at the top of this file). Depth comes AFTER the leg;
+         * parsing it first rejected every minted deepen cursor. */
+        if ((*p != 'o' && *p != 'i') || p[1] != '.') {
+            return "invalid_cursor: unrecognized token — re-run the original query without "
+                   "'cursor'";
+        }
+        out->leg = *p;
+        p += 2; /* leg + '.' */
         errno = 0;
         char *depth_end = NULL;
         long parsed_depth = strtol(p, &depth_end, 10);
@@ -8866,12 +8875,14 @@ static const char *trace_cursor_decode(const char *token, const char *current_ge
         }
         out->depth = (int)parsed_depth;
         p = depth_end + 1;
+    } else {
+        if ((*p != 'o' && *p != 'i') || p[1] != '.') {
+            return "invalid_cursor: unrecognized token — re-run the original query without "
+                   "'cursor'";
+        }
+        out->leg = *p;
+        p += 2; /* leg + '.' */
     }
-    if ((*p != 'o' && *p != 'i') || p[1] != '.') {
-        return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
-    }
-    out->leg = *p;
-    p += 2; /* leg + '.' */
     const char *gen_end = strchr(p, '.');
     if (!gen_end || gen_end == p || (size_t)(gen_end - p) >= sizeof(out->generation)) {
         return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
@@ -17195,6 +17206,18 @@ render_detect_output:;
                     cbm_tree_scalar_bool(&floor, "engine_saturated", true);
                 }
                 cbm_tree_scalar_int(&floor, "max_output_bytes", (long long)output_budget_bytes);
+                /* The change totals ARE mandatory metadata: a budget-strapped
+                 * agent still needs to learn how many paths changed. */
+                cbm_tree_scalar_int(&floor, "changed_total", file_count);
+                cbm_tree_scalar_int(&floor, "changed_returned", changed_returned);
+                cbm_tree_scalar_bool(&floor, "changed_has_more", changed_has_more);
+                if (changed_has_more && changed_returned == 0) {
+                    cbm_tree_scalar_bool(&floor,
+                                         changed_limit == 0
+                                             ? "changed_continuation_requires_positive_limit"
+                                             : "changed_continuation_requires_higher_budget",
+                                         true);
+                }
                 cbm_tree_scalar_str(&floor, "hint",
                                     "mandatory detect_changes metadata exceeds the budget; raise "
                                     "max_output_tokens (no path or identifier was sliced)");
@@ -17210,6 +17233,16 @@ render_detect_output:;
                     yyjson_mut_obj_add_bool(floor_doc, floor, "engine_saturated", true);
                 }
                 yyjson_mut_obj_add_uint(floor_doc, floor, "max_output_bytes", output_budget_bytes);
+                yyjson_mut_obj_add_int(floor_doc, floor, "changed_total", file_count);
+                yyjson_mut_obj_add_int(floor_doc, floor, "changed_returned", changed_returned);
+                yyjson_mut_obj_add_bool(floor_doc, floor, "changed_has_more", changed_has_more);
+                if (changed_has_more && changed_returned == 0) {
+                    yyjson_mut_obj_add_bool(floor_doc, floor,
+                                            changed_limit == 0
+                                                ? "changed_continuation_requires_positive_limit"
+                                                : "changed_continuation_requires_higher_budget",
+                                            true);
+                }
                 yyjson_mut_obj_add_str(
                     floor_doc, floor, "hint",
                     "mandatory detect_changes metadata exceeds the budget; raise "
