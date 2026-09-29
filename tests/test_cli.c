@@ -11767,7 +11767,7 @@ TEST(cli_codex_migrates_to_single_hook_representation) {
     hooks = read_test_file_alloc(hooks_path);
     char *agents_after_uninstall = read_test_file_alloc(agents_path);
     /* #1954: the ambiguous hook fails the exit code; the binary still goes. */
-    bool independent_cleanup = uninstall_rc != 0 && stat(binary_path, &state) != 0 &&
+bool independent_cleanup = uninstall_rc != 0 && stat(binary_path, &state) != 0 &&
                                stat(skill_path, &state) != 0 && stat(agent_path, &state) != 0 &&
                                hooks && !strstr(hooks, "hook-augment") && agents_after_uninstall &&
                                agents_after_uninstall[0] == '\0';
