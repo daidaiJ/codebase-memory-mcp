@@ -665,8 +665,10 @@ TEST(daemon_ipc_windows_default_endpoint_ignores_temp_environment) {
     char parent_b[TEST_PATH_CAP] = {0};
     char runtime_a[TEST_PATH_CAP] = {0};
     char runtime_b[TEST_PATH_CAP] = {0};
-    char address_a[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
-    char address_b[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
+    /* TEST_PATH_CAP: ipc_test_copy_path's destination contract is TEST_PATH_CAP
+     * (gcc -Wstringop-overflow), the stored address never exceeds NAME_CAP. */
+    char address_a[TEST_PATH_CAP] = {0};
+    char address_b[TEST_PATH_CAP] = {0};
     ipc_test_win_env_t saved_tmp = {0};
     ipc_test_win_env_t saved_temp = {0};
     cbm_daemon_ipc_endpoint_t *endpoint_a = NULL;
@@ -1386,7 +1388,7 @@ TEST(daemon_ipc_windows_startup_retries_transient_rendezvous_reader) {
     static const char key[] = "81b2c3d4e5f60719";
     char parent[TEST_PATH_CAP] = {0};
     char runtime_dir[TEST_PATH_CAP] = {0};
-    char address[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
+    char address[TEST_PATH_CAP] = {0};
     cbm_daemon_ipc_endpoint_t *endpoint = NULL;
     cbm_private_lock_directory_t *directory = NULL;
     cbm_private_file_lock_t *record_reader = NULL;
@@ -1452,8 +1454,8 @@ TEST(daemon_ipc_windows_rendezvous_bridges_concurrent_lifetime_owner) {
     static const char key[] = "71b2c3d4e5f60729";
     char parent[TEST_PATH_CAP] = {0};
     char runtime_dir[TEST_PATH_CAP] = {0};
-    char before[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
-    char after[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
+    char before[TEST_PATH_CAP] = {0};
+    char after[TEST_PATH_CAP] = {0};
     cbm_daemon_ipc_endpoint_t *endpoint = NULL;
     cbm_daemon_ipc_startup_lock_t *initial_startup = NULL;
     cbm_private_lock_directory_t *directory = NULL;
@@ -1546,10 +1548,12 @@ TEST(daemon_ipc_windows_generation_rotates_and_escapes_occupied_old_pipe) {
     static const char key[] = "a1b2c3d4e5f60718";
     char parent[TEST_PATH_CAP] = {0};
     char runtime_dir[TEST_PATH_CAP] = {0};
-    char first_address[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
-    char first_peer_address[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
-    char second_address[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
-    char second_peer_address[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
+    char first_address[TEST_PATH_CAP] = {0};
+    char first_peer_address[TEST_PATH_CAP] = {0};
+    /* TEST_PATH_CAP, not the 256-byte endpoint name cap: ipc_test_copy_path's
+     * contract is a TEST_PATH_CAP-sized destination (gcc -Wstringop-overflow). */
+    char second_address[TEST_PATH_CAP] = {0};
+    char second_peer_address[TEST_PATH_CAP] = {0};
     cbm_daemon_ipc_endpoint_t *endpoint = NULL;
     cbm_daemon_ipc_endpoint_t *peer = NULL;
     cbm_daemon_ipc_startup_lock_t *first_startup = NULL;
@@ -1643,9 +1647,9 @@ TEST(daemon_ipc_windows_corrupt_rendezvous_fails_closed_until_startup_repairs) {
     static const uint8_t partial[] = {'C', 'B', 'M', 'R', 'D', 'V', '1'};
     char parent[TEST_PATH_CAP] = {0};
     char runtime_dir[TEST_PATH_CAP] = {0};
-    char original_address[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
-    char repaired_address[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
-    char rebound_address[CBM_DAEMON_IPC_WINDOWS_NAME_CAP] = {0};
+    char original_address[TEST_PATH_CAP] = {0};
+    char repaired_address[TEST_PATH_CAP] = {0};
+    char rebound_address[TEST_PATH_CAP] = {0};
     cbm_daemon_ipc_endpoint_t *endpoint = NULL;
     cbm_daemon_ipc_endpoint_t *reader = NULL;
     cbm_daemon_ipc_startup_lock_t *startup = NULL;

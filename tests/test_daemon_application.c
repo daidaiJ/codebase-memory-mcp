@@ -776,7 +776,11 @@ TEST(daemon_application_mcp_notification_has_no_response) {
         encoded ? app_test_request(&callbacks, session, context, context_length, &response,
                                    &response_length)
                 : CBM_DAEMON_RUNTIME_APPLICATION_TRANSPORT_ERROR;
-    free(response);
+    /* The sentinel catches a callback that never wrote response_out; only a
+     * real (heap or NULL) outcome may reach free — never the sentinel itself. */
+    if (response != (uint8_t *)(uintptr_t)1) {
+        free(response);
+    }
     response = (uint8_t *)(uintptr_t)1;
     response_length = UINT32_MAX;
     cbm_daemon_runtime_application_status_t notification_status =

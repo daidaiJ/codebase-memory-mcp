@@ -431,6 +431,7 @@ struct cbm_subprocess {
     HANDLE job;
     DWORD process_id;
     bool root_forced;
+    bool job_memory_captured;
 #else
     pid_t pid;
     pid_t pgid;
@@ -565,6 +566,31 @@ static void cbm_subprocess_delete_log(cbm_subprocess_t *process) {
 #endif
 }
 
+#ifdef _WIN32
+/* Terminal Job Object memory evidence. Upstream added the result fields and
+ * the enforcing test's assertions without the query that fills them, so
+ * job_memory_available could never become true. Best-effort on purpose: an
+ * unqueryable job reports available=false and the supervisor prints
+ * "unavailable" instead of inventing numbers. */
+static void cbm_win_capture_job_memory(cbm_subprocess_t *process) {
+    if (process->job_memory_captured) {
+        return;
+    }
+    process->job_memory_captured = true;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+    ZeroMemory(&limits, sizeof(limits));
+    if (!QueryInformationJobObject(process->job, JobObjectExtendedLimitInformation, &limits,
+                                   sizeof(limits), NULL)) {
+        return;
+    }
+    process->result.job_memory_available = true;
+    if (limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY) {
+        process->result.job_memory_limit_bytes = (size_t)limits.JobMemoryLimit;
+    }
+    process->result.peak_job_memory_bytes = (size_t)limits.PeakJobMemoryUsed;
+}
+#endif
+
 static bool cbm_subprocess_begin_terminal_transition(cbm_subprocess_t *process) {
     int lifecycle = atomic_load_explicit(&process->lifecycle, memory_order_acquire);
     for (;;) {
@@ -578,6 +604,9 @@ static bool cbm_subprocess_begin_terminal_transition(cbm_subprocess_t *process) 
         if (atomic_compare_exchange_weak_explicit(&process->lifecycle, &lifecycle, desired,
                                                   memory_order_acq_rel, memory_order_acquire)) {
             process->result.cancellation_requested = lifecycle == CBM_SUBPROCESS_CANCEL_REQUESTED;
+#ifdef _WIN32
+            cbm_win_capture_job_memory(process);
+#endif
             return true;
         }
     }

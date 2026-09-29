@@ -771,7 +771,10 @@ TEST(subprocess_windows_job_object_enforces_memory_limit) {
      * shortage must fail this test, not masquerade as Job Object enforcement. */
     cbm_proc_result_t uncapped = {0};
     int uncapped_rc = cbm_subprocess_run(&opts, &uncapped);
-    opts.memory_limit_bytes = (size_t)1024U * 1024U * 1024U;
+    /* The probe commits 512 MiB (test_main.c); the cap must sit BELOW that
+     * commit for the job to deny it. A cap at or above the probe size cannot
+     * trip and the RED path silently degrades to a clean exit. */
+    opts.memory_limit_bytes = (size_t)256U * 1024U * 1024U;
     cbm_proc_result_t result = {0};
     int run_rc = cbm_subprocess_run(&opts, &result);
     free(self_path);
