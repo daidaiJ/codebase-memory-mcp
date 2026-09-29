@@ -95,5 +95,3 @@ soak-results-query-leak/
 /wiki
 /issues
 
-# handoff (session task handoff, per my-skills/context-standards/handoff)
-/.handoff/
