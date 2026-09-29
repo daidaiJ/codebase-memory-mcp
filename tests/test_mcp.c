@@ -20706,7 +20706,10 @@ static int idx853_supervised_autowatch_check(const char *repo_dir, const char *c
     int spawns_before = cbm_index_supervisor_spawn_count();
     int code = IDX853_SETUP_FAIL;
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    /* Fork issue #5: auto_index fires on ALL-profile sessions only, and the
+     * supervised autoindex path under test is likewise ALL-only — a minimal
+     * default server never reaches it. */
+    cbm_mcp_server_t *srv = test_server_all_surface();
     if (srv) {
         cbm_mcp_server_set_watcher(srv, watcher);
         cbm_mcp_server_set_config(srv, cfg);
@@ -21163,7 +21166,10 @@ static int idxcanon_supervised_session_path_check(const char *session_root, cons
     char *session_project = cbm_project_name_from_path(session_repo);
     char *decoy_project = cbm_project_name_from_path(decoy_repo);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    /* Fork issue #5: a supervised host dispatches index_repository, which only
+     * exists on the ALL surface (CLI / daemon-internal sessions) — the minimal
+     * agent face cannot reach the supervised path at all. */
+    cbm_mcp_server_t *srv = test_server_all_surface();
     int code = IDXCANON_OK;
     if (!srv) {
         code = IDXCANON_NO_SERVER;

@@ -42,7 +42,15 @@ surface. This includes the supervised index worker: `<self> cli --index-worker
 fork default is MINIMAL, so the worker explicitly resets its profile to ALL
 before dispatch (v0.8.1-fork.2; the first patch build rejected
 `index_repository` there — the worker inherited the minimal allowlist its own
-parent's tool is not on). Consequence worth knowing: `auto_index` fires only
+parent's tool is not on). The test-runner's worker emulation
+(`tests/test_main.c` `tf_maybe_run_index_worker`) mirrors the production
+worker and needed the same reset — missed until the 2026-09-30 WSL ASan
+re-check, where all 7 POSIX-only supervisor tests failed with the worker
+answering "not available in the minimal tool profile"; the IDXCANON and
+IDX853 forked children in `tests/test_mcp.c` construct their host with the
+bare minimal default and now use `test_server_all_surface()` for the same
+reason (auto_index likewise fires only on ALL-profile sessions). Consequence
+worth knowing: `auto_index` fires only
 on ALL-profile sessions (upstream gate kept), so an explicitly-enabled
 `auto_index` pairs with `--tool-profile=all`; the minimal workflow refreshes
 out-of-band (`cbm cli index_repository`).

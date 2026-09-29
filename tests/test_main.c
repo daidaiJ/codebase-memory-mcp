@@ -390,6 +390,10 @@ static int tf_maybe_run_index_worker(int argc, char **argv) {
     if (!srv) {
         return 1;
     }
+    /* Fork patch (fork issue #5): mirror the production worker entry (main.c) —
+     * the worker re-dispatches the parent's tool (index_repository), which is
+     * not on the MINIMAL default surface, so the worker resets to ALL. */
+    cbm_mcp_server_set_tool_profile(srv, CBM_MCP_TOOL_PROFILE_ALL);
     char *result = cbm_mcp_handle_tool(srv, "index_repository", invocation.args_json);
     if (result) {
         const char *ro = cbm_index_worker_response_out();
