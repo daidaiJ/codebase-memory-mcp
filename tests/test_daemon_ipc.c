@@ -5203,7 +5203,19 @@ TEST(daemon_ipc_posix_single_uid_userns_real_smoke_issue1830) {
     if (WIFEXITED(status) && WEXITSTATUS(status) == 3) {
         FAIL("userns smoke could not re-exec /proc/self/exe for the probe");
     }
-    ASSERT_TRUE(WIFEXITED(status));
+    /* {0,1,2,3} is the whole protocol. Any other code -- a sanitizer exit (LSan
+     * defaults to 23), an abort, a signal -- is a broken harness, not a refusal,
+     * and must say so with the code it actually saw. */
+    if (!WIFEXITED(status)) {
+        FAIL("userns probe did not exit normally (signalled) -- not a security verdict");
+    }
+    if (WEXITSTATUS(status) != 0 && WEXITSTATUS(status) != 1) {
+        char unexpected[128];
+        (void)snprintf(unexpected, sizeof(unexpected),
+                       "userns probe exited %d -- not a security verdict",
+                       WEXITSTATUS(status));
+        FAIL(unexpected);
+    }
     ASSERT_EQ(0, WEXITSTATUS(status));
     PASS();
 #else

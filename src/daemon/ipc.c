@@ -1572,7 +1572,17 @@ static void posix_overflow_init_once(void) {
 #endif /* __linux__ */
 
 /* The overflow uid tolerated for ancestors in this process, or
- * POSIX_NO_OVERFLOW_UID when none. Derived once from immutable /proc state. */
+ * POSIX_NO_OVERFLOW_UID when none.
+ *
+ * Derived once per process. NOT from immutable state, whatever an earlier
+ * revision of this comment claimed: unshare(CLONE_NEWUSER) rewrites
+ * /proc/self/uid_map, and pthread_once state survives fork() already marked
+ * done. A child that forks WITHOUT exec and then changes namespace therefore
+ * keeps the parent answer. That is safe here only because every caller runs in
+ * a freshly exec'd process -- the daemon double-fork execs
+ * (daemon/bootstrap.c), workers go through cbm_subprocess_spawn's fork+exec,
+ * and src/ contains no setns/unshare at all. If you ever add a fork-without-exec
+ * path that reaches this check, this cache is WRONG and must go. */
 static uid_t posix_ancestor_overflow_uid(void) {
 #ifdef CBM_ENABLE_TEST_SEAMS
     if (g_posix_overflow_override_active) {
