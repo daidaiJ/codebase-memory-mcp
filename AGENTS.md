@@ -119,3 +119,20 @@ gcc -fsyntax-only -std=c11 -Isrc -Ivendored -Ivendored/sqlite3 \
     FORK_PATCHES §9 与 handoff 文档 §8 的踩坑记录再归因。
 - 历史任务源：[`.handoff/minimal-swap-t2-t7.md`](.handoff/minimal-swap-t2-t7.md)
   （已标记 done）与 `.plan/spec.md`。
+
+## 🔄 Handoff 摘要
+
+### local-build-test-first-run — in-progress（2026-09-29）
+
+- **当前状态：** 本机首次实跑构建+测试：构建 ✅、test_mcp.c 编译阻塞已修（`fd89f6a3` 已推送）、
+  聚焦 9 suite 已跑（2336 PASS / 173 FAIL，**语言 suite 全绿**，mcp 172 + watcher 1 失败已定位根因）；
+  全量测试仅跑 ~45%，剩余由维护者继续。
+- **关键证据：** minimal 面唯一真实遗留 = T6 测试末尾 cursor 断言与 pinned minimal=3 工具 <
+  页大小 8 矛盾（`tests/test_mcp.c:1983`），永不通过；其余 mcp 失败均为非 minimal 工具在默认
+  MINIMAL profile 下被 deny 的旧断言。详见 handoff §3/§4。
+- **验收标准：** 全量测试跑完 + minimal 面与 watcher suite 全绿（见 handoff §5）。
+- **详情指针：** [`.handoff/local-build-test-first-run.md`](.handoff/local-build-test-first-run.md)
+- **未验证事项：**
+  - [ ] 全量 144 suite 测试（剩余 ~135 个未跑）
+  - [ ] log/index_policy/subprocess 三个孤立失败归因
+  - [ ] 索引冒烟检查（BUILD_WINDOWS.md SMOKE 配方）
