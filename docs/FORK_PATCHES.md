@@ -123,6 +123,47 @@ Earlier name `CBM_SKIP_DACL_HARDENING` (opt-out while default stayed strict)
 existed only in the first patch build and was replaced by the inverted
 `CBM_DACL_HARDENING` before any tagged release.
 
+## 5. trace_path caller-resolution health summary (fork issue #6)
+
+Upstream pain point: `trace_path(direction=inbound)` returning
+`callers_total: 0` is indistinguishable from "the graph has no callers"
+from "every caller edge failed to resolve" — framework/DI dispatch is
+invisible to static resolution (NestJS-style containers resolve ~70% of call
+sites, upstream #514), and a field agent reads the zero as a negative result.
+The fix puts the distinction IN the response (fork issue #6): every inbound
+trace now carries
+
+- `caller_resolution` — tree: `"2/3 resolved, 1 unresolved"`;
+  json: `{"resolved":2,"total":3,"unresolved":1}`. Counted over the exact
+  rows `callers_total` counts (same test-file filter), classified per row by
+  the existing canonical-predecessor machinery (`trace_predecessor_edge` +
+  `trace_edge_evidence` → closed class vocabulary): non-`unresolved` class =
+  resolved; `unresolved` class or a CALLS edge without strategy = unresolved.
+- `caller_resolution_note` — fixed teaching text, emitted when `total == 0`
+  or `unresolved/total >= 0.5` (named constant
+  `TRACE_CALLER_UNRESOLVED_NOTE_RATIO`; the 0.5 threshold follows from the
+  ~70% container-dispatch figure — past half, the list is more noise than
+  signal). Same constant on both emitters.
+
+- `src/mcp/mcp.c` — stats helper + both emitters (`trace_emit_caller_resolution_*`);
+  the inbound BFS now collects edge properties even when `include_evidence`
+  is off (`in_edge_data_limit`), because without them every row would
+  misclassify as unresolved. Outbound leg unchanged.
+- `tests/test_mcp.c` — `tool_trace_path_caller_resolution_summary`: counts on
+  tree+json, note absent at 1/3, note fires at exactly 1/2 and at total==0,
+  `include_evidence=true` keeps the summary once and consistent with the
+  evidence columns, raw strategy names never leak.
+
+Deliberately asymmetric: `direction=outbound` gets NO symmetric
+`callee_resolution` — the motivating ambiguity is entirely on the caller side
+(callees of a known function resolve by reading its body; callers may be
+container-dispatched). Revisit only with field evidence.
+
+Known skew, by design: when the inbound edge collection saturates
+(`edge_data_saturated: true`, 5000-edge ceiling) some predecessor edges are
+absent and their rows classify as unresolved — the response already flags the
+saturation loudly; the summary counts the evidence actually available.
+
 ## Verification notes
 
 - `tests/test_mem.c` updated to the capped-default semantics (incl. new

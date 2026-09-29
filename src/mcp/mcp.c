@@ -9094,6 +9094,78 @@ static void trace_emit_omitted_optional_fields_json(yyjson_mut_doc *doc, yyjson_
     yyjson_mut_obj_add_val(doc, root, "omitted_optional_fields", names);
 }
 
+/* ── Caller-resolution health summary (fork issue #6) ───────────── */
+
+/* Above this unresolved share the caller list is more noise than signal:
+ * framework/DI containers dispatch the majority of real call sites (NestJS
+ * measures ~70% of call edges as container-resolved, upstream #514), so a
+ * half-garbled list — or an empty one — must not read as a negative result. */
+#define TRACE_CALLER_UNRESOLVED_NOTE_RATIO 0.5
+#define TRACE_CALLER_RESOLUTION_NOTE                                        \
+    "unresolved callers are common with framework/DI dispatch — 0 callers " \
+    "does not mean no callers; retry with include_evidence=true"
+
+typedef struct {
+    int total;
+    int resolved;
+    int unresolved;
+} trace_resolution_stats_t;
+
+/* Classify every visible inbound row with the same machinery as the
+ * include_evidence columns (canonical predecessor edge + strategy class):
+ * a non-"unresolved" class means resolved; "unresolved" or a CALLS edge
+ * without strategy means unresolved. The filter must match callers_total
+ * exactly — a summary that disagrees with the total printed beside it reads
+ * as corruption (the lesson behind the callers_total test-file filter). */
+static trace_resolution_stats_t
+trace_caller_resolution_stats(const cbm_traverse_result_t *tr, bool include_tests,
+                              const trace_edge_context_t *edge_ctx) {
+    trace_resolution_stats_t st = {0, 0, 0};
+    for (int i = 0; i < tr->visited_count; i++) {
+        if (!include_tests && is_test_file(tr->visited[i].node.file_path)) {
+            continue;
+        }
+        st.total++;
+        const char *cls = NULL;
+        double conf = -1.0;
+        const cbm_edge_info_t *predecessor = trace_predecessor_edge(edge_ctx, &tr->visited[i]);
+        if (trace_edge_evidence(predecessor, &cls, &conf) && strcmp(cls, "unresolved") != 0) {
+            st.resolved++;
+        } else {
+            st.unresolved++;
+        }
+    }
+    return st;
+}
+
+static bool trace_resolution_note_warranted(const trace_resolution_stats_t *st) {
+    return st->total == 0 ||
+           (double)st->unresolved / (double)st->total >= TRACE_CALLER_UNRESOLVED_NOTE_RATIO;
+}
+
+static void trace_emit_caller_resolution_tree(cbm_sb_t *sb, const trace_resolution_stats_t *st) {
+    char buf[CBM_SZ_64];
+    snprintf(buf, sizeof(buf), "%d/%d resolved, %d unresolved", st->resolved, st->total,
+             st->unresolved);
+    cbm_tree_scalar_str(sb, "caller_resolution", buf);
+    if (trace_resolution_note_warranted(st)) {
+        cbm_tree_scalar_str(sb, "caller_resolution_note", TRACE_CALLER_RESOLUTION_NOTE);
+    }
+}
+
+static void trace_emit_caller_resolution_json(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                              const trace_resolution_stats_t *st) {
+    yyjson_mut_val *obj = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_int(doc, obj, "resolved", st->resolved);
+    yyjson_mut_obj_add_int(doc, obj, "total", st->total);
+    yyjson_mut_obj_add_int(doc, obj, "unresolved", st->unresolved);
+    yyjson_mut_obj_add_val(doc, root, "caller_resolution", obj);
+    if (trace_resolution_note_warranted(st)) {
+        yyjson_mut_obj_add_str(doc, root, "caller_resolution_note",
+                               TRACE_CALLER_RESOLUTION_NOTE);
+    }
+}
+
 /* Clamp a client-supplied traversal depth to the MCP ceiling (cbm_mcp_max_depth),
  * WARN-logging when it does so — never a silent truncation (#887). An unclamped
  * `depth` would drive the shared cbm_store_bfs to an arbitrary hop count. */
@@ -9335,6 +9407,10 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     bool data_flow = mode && strcmp(mode, "data_flow") == 0;
     bool need_edge_data = data_flow || include_evidence;
     int edge_data_limit = need_edge_data ? MCP_BFS_LIMIT_MAX : 0;
+    /* The caller-resolution summary (fork #6) reads predecessor-edge evidence
+     * on the inbound leg even when include_evidence stays off; without edge
+     * data every caller row would misclassify as unresolved. */
+    int in_edge_data_limit = do_inbound ? MCP_BFS_LIMIT_MAX : edge_data_limit;
 
     (void)sel; /* union across all same-name nodes — see bfs_union_same_name (#546) */
 
@@ -9352,7 +9428,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     if (traversal_rc == CBM_STORE_OK && do_inbound) {
         traversal_rc =
             bfs_union_same_name(store, nodes, node_count, "inbound", edge_types, edge_type_count,
-                                depth, MCP_BFS_LIMIT_MAX, edge_data_limit, &tr_in);
+                                depth, MCP_BFS_LIMIT_MAX, in_edge_data_limit, &tr_in);
     }
     if (traversal_rc != CBM_STORE_OK) {
         cbm_store_traverse_free(&tr_out);
@@ -9505,6 +9581,12 @@ render_trace_output:;
             in_total++;
         }
     }
+    /* Caller-resolution health (fork #6): computed once per render pass on the
+     * same filtered rows callers_total counts, so the two always agree. */
+    trace_resolution_stats_t in_resolution = {0, 0, 0};
+    if (do_inbound) {
+        in_resolution = trace_caller_resolution_stats(&tr_in, include_tests, &in_edge_ctx);
+    }
 
     free(json);
     json = NULL;
@@ -9536,6 +9618,7 @@ render_trace_output:;
         if (do_inbound) {
             cbm_tree_scalar_int(&sb, "callers_total", in_total);
             cbm_tree_scalar_str(&sb, "callers_total_relation", tr_in.truncated ? "gte" : "eq");
+            trace_emit_caller_resolution_tree(&sb, &in_resolution);
             if (flat_trace) {
                 bfs_to_toon_table(&sb, "callers", &view_in, render_risk, include_tests,
                                   render_data_flow, render_evidence, &in_edge_ctx);
@@ -9613,6 +9696,7 @@ render_trace_output:;
             yyjson_mut_obj_add_int(doc, root, "callers_total", in_total);
             yyjson_mut_obj_add_str(doc, root, "callers_total_relation",
                                    tr_in.truncated ? "gte" : "eq");
+            trace_emit_caller_resolution_json(doc, root, &in_resolution);
             yyjson_mut_obj_add_val(
                 doc, root, "callers",
                 bfs_to_tree_json(doc, &view_in, risk_labels && emit_optional_fields, include_tests,

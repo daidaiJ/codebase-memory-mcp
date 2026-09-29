@@ -7373,6 +7373,159 @@ TEST(tool_trace_path_evidence_is_opt_in_and_class_mapped) {
     PASS();
 }
 
+/* Caller-resolution health summary (fork issue #6): without include_evidence
+ * the default trace must still tell "0 callers / half-unresolved callers"
+ * apart from a genuinely healthy caller set, using the SAME per-row edge
+ * evidence the opt-in columns publish. Fixture: one well-resolved target
+ * (2 resolved + 1 lsp_unresolved -> no note below the 0.5 threshold), a
+ * half-unresolved target (exactly 0.5 -> note fires), and an orphan with no
+ * callers at all (total==0 -> note fires). Both emitters must agree. */
+TEST(tool_trace_path_caller_resolution_summary) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "res-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/res");
+
+    int64_t ids[8];
+    const char *names[8] = {"target",  "c_res_a",  "c_res_b",     "c_unres",
+                            "orphan",  "h_target", "h_res",       "h_unres"};
+    for (int i = 0; i < 8; i++) {
+        cbm_node_t n = {.project = proj,
+                        .label = "Function",
+                        .name = names[i],
+                        .qualified_name = NULL,
+                        .file_path = "src/r.c",
+                        .start_line = i * 10 + 1,
+                        .end_line = i * 10 + 5};
+        char qn[64];
+        snprintf(qn, sizeof(qn), "res-proj.src.%s", names[i]);
+        n.qualified_name = qn;
+        ids[i] = cbm_store_upsert_node(st, &n);
+        ASSERT_GT(ids[i], 0);
+    }
+    /* Exactly the shape pass_calls.c:355 writes in production. */
+    cbm_edge_t edges[] = {
+        {.project = proj,
+         .source_id = ids[1],
+         .target_id = ids[0],
+         .type = "CALLS",
+         .properties_json = "{\"strategy\":\"lsp_trait_dispatch\",\"confidence\":0.9}"},
+        {.project = proj,
+         .source_id = ids[2],
+         .target_id = ids[0],
+         .type = "CALLS",
+         .properties_json = "{\"strategy\":\"callee_suffix\",\"confidence\":0.8}"},
+        {.project = proj,
+         .source_id = ids[3],
+         .target_id = ids[0],
+         .type = "CALLS",
+         .properties_json = "{\"strategy\":\"lsp_unresolved\",\"confidence\":0.1}"},
+        {.project = proj,
+         .source_id = ids[6],
+         .target_id = ids[5],
+         .type = "CALLS",
+         .properties_json = "{\"strategy\":\"lsp_trait_dispatch\",\"confidence\":0.9}"},
+        {.project = proj,
+         .source_id = ids[7],
+         .target_id = ids[5],
+         .type = "CALLS",
+         .properties_json = "{\"strategy\":\"lsp_unresolved\",\"confidence\":0.1}"},
+    };
+    for (size_t e = 0; e < sizeof(edges) / sizeof(edges[0]); e++) {
+        ASSERT_GT(cbm_store_insert_edge(st, &edges[e]), 0);
+    }
+
+    /* Tree, default (no include_evidence): 2/3 resolved is below the note
+     * threshold — counts yes, teaching note no. */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":911,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"target\","
+             "\"project\":\"res-proj\",\"direction\":\"inbound\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "callers_total: 3"));
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: 2/3 resolved, 1 unresolved"));
+    ASSERT_NULL(strstr(txt, "caller_resolution_note"));
+    ASSERT_NULL(strstr(txt, "lsp_trait_dispatch")); /* class vocabulary only */
+    free(txt);
+    free(resp);
+
+    /* Legacy json emitter: same counts, structured object, same note policy. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":912,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"target\","
+             "\"project\":\"res-proj\",\"direction\":\"inbound\",\"format\":\"json\"}}}");
+    ASSERT_NOT_NULL(resp);
+    txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    yyjson_doc *doc = yyjson_read(txt, strlen(txt), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *res = yyjson_obj_get(root, "caller_resolution");
+    ASSERT_NOT_NULL(res);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(res, "resolved")), 2);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(res, "total")), 3);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(res, "unresolved")), 1);
+    ASSERT_NULL(yyjson_obj_get(root, "caller_resolution_note"));
+    yyjson_doc_free(doc);
+    free(txt);
+    free(resp);
+
+    /* Boundary: exactly 0.5 unresolved fires the note on both emitters. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":913,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"h_target\","
+             "\"project\":\"res-proj\",\"direction\":\"inbound\"}}}");
+    ASSERT_NOT_NULL(resp);
+    txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: 1/2 resolved, 1 unresolved"));
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution_note"));
+    ASSERT_NOT_NULL(strstr(txt, "does not mean no callers"));
+    free(txt);
+    free(resp);
+
+    /* The motivation itself: zero callers must not read as a negative
+     * result — the summary is emitted with the note, never omitted. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":914,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"orphan\","
+             "\"project\":\"res-proj\",\"direction\":\"inbound\"}}}");
+    ASSERT_NOT_NULL(resp);
+    txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "callers_total: 0"));
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: 0/0 resolved, 0 unresolved"));
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution_note"));
+    free(txt);
+    free(resp);
+
+    /* include_evidence=true: the summary stays, once, and agrees with the
+     * per-row evidence columns (no duplicate or conflicting field). */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":915,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"target\","
+             "\"project\":\"res-proj\",\"direction\":\"inbound\",\"include_evidence\":true}}}");
+    ASSERT_NOT_NULL(resp);
+    txt = extract_text_content(resp);
+    ASSERT_NOT_NULL(txt);
+    ASSERT_NOT_NULL(strstr(txt, "strategy")); /* evidence columns rendered */
+    int occurrences = 0;
+    for (const char *p = txt; (p = strstr(p, "caller_resolution:")) != NULL; p++) {
+        occurrences++;
+    }
+    ASSERT_EQ(occurrences, 1);
+    ASSERT_NOT_NULL(strstr(txt, "caller_resolution: 2/3 resolved, 1 unresolved"));
+    ASSERT_NULL(strstr(txt, "caller_resolution_note"));
+    free(txt);
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 /* Edge-data lookup must follow the traversal direction and shortest-path hop.
  * The induced edge set contains a same-hop cross edge whose source is the row
  * node and sorts before its real inbound predecessor. An arbitrary incident-
@@ -20600,6 +20753,7 @@ SUITE(mcp) {
     RUN_TEST(tool_trace_call_path_prefers_definition);
     RUN_TEST(trace_evidence_strategy_class_vocabulary_is_closed);
     RUN_TEST(tool_trace_path_evidence_is_opt_in_and_class_mapped);
+    RUN_TEST(tool_trace_path_caller_resolution_summary);
     RUN_TEST(tool_trace_path_evidence_columns_match_header_issue1542);
     RUN_TEST(tool_trace_path_unreadable_confidence_reports_not_recorded);
     RUN_TEST(tool_trace_path_edge_details_use_canonical_predecessor);
