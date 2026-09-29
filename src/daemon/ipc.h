@@ -106,6 +106,13 @@ bool cbm_daemon_ipc_posix_ancestor_stat_ok_for_test(unsigned long owner, unsigne
                                                     unsigned long euid, bool overflow_active,
                                                     unsigned long overflow_uid);
 #endif
+#ifdef _WIN32
+/* #1705: run the daemon's directory-owner/ACE trust predicate against an
+ * arbitrary SID, so a test can assert THIS machine's built-in Administrator
+ * (RID-500) is trusted while a foreign S-1-5-21-*-500 is not. Returns false on
+ * any setup failure. Windows only. */
+bool cbm_daemon_ipc_win_sid_trusted_for_testing(void *sid);
+#endif
 #endif
 
 /* Create/validate an owner-only directory and securely open one regular
