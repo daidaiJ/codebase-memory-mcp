@@ -20744,7 +20744,7 @@ SUITE(mcp) {
     RUN_TEST(mcp_issue403_explicit_approval_preserves_auto_index);
 #endif
     RUN_TEST(server_handle_tools_list);
-    RUN_TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor);
+    RUN_TEST(server_handle_tools_list_defaults_to_minimal_surface_and_accepts_cursor);
     RUN_TEST(server_handle_analysis_profile_filters_and_rejects_mutators);
     RUN_TEST(server_handle_scout_profile_exposes_only_the_fast_tier);
     RUN_TEST(analysis_profile_arguments_fail_closed_and_disable_http);

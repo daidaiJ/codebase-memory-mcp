@@ -206,3 +206,15 @@ honest about the limit instead of faking precision.
   session rather than mis-read the value.
 - Build: release artifacts via the fork's lean GitHub Actions workflow
   (windows-amd64), replacing `~/tools/codebase-memory-mcp/`.
+- Trust repair (2026-09, issues #5/#6/#7) verification matrix:
+  - #5 — `server_handle_tools_list_defaults_to_minimal_surface_and_accepts_cursor`
+    (exact membership + count pin), no-flag parse asserts MINIMAL, explicit
+    `--tool-profile=all` keeps ALL.
+  - #6 — `tool_trace_path_caller_resolution_summary`: counts on tree+json,
+    note absent at 1/3, note fires at exactly 1/2 and at total==0,
+    `include_evidence=true` keeps the summary once and consistent.
+  - #7 — `tool_detect_changes_honesty_note_in_both_formats`: both fields in
+    both formats on the zero-impacted case.
+  - Full-suite note: `make -f Makefile.cbm test` on a maintainer machine is
+    the acceptance gate (fork CI builds only); see docs/BUILD_WINDOWS.md for
+    the Windows recipe.

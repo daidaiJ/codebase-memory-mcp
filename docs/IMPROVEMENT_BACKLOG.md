@@ -41,6 +41,15 @@ only target the three ways tools in this class die in practice:
 - Lands in: `trace_path` tree/json response builders (`src/mcp/mcp.c`).
 - Fork alignment: extends the fail-loud principle (fork issue #4) from
   rejection paths to query results.
+- **Landed in fork (2026-09-29, fork issue #6, spec T2 — commit `c9f5bcbf`)**:
+  `caller_resolution` counts the exact rows `callers_total` counts, classified
+  per row by the existing canonical-predecessor machinery; note fires at
+  `total == 0` or `unresolved/total >= 0.5` (named constant
+  `TRACE_CALLER_UNRESOLVED_NOTE_RATIO`, justified by the #514 ~70% figure).
+  One deliberate widening beyond the original "output-layer only" shape: the
+  inbound BFS now collects edge properties even when `include_evidence` is
+  off — without them every row would misclassify as unresolved. See
+  FORK_PATCHES §5.
 
 ### B2. `detect_changes`: `unknown` semantics + fail loud on invalid direction
 
@@ -53,6 +62,17 @@ only target the three ways tools in this class die in practice:
   fork constraint); verdicts whose graph support is unresolved return
   `dead: "unknown"` instead of a bare boolean. Tests first.
 - Lands in: `detect_changes` handler + `tests/`.
+- **Landed in fork, downgraded shape (2026-09-29, fork issue #7, spec T3 —
+  commit `3037dd6f`)**: two findings reshaped this item during spec
+  verification. (1) The direction half was already fixed upstream (commit
+  `60390aff`, in the fork baseline, test-pinned) — no fork work needed.
+  (2) The `dead: "unknown"` half does not apply: this fork's detect_changes
+  has no `dead` verdict at all (output is changed files + impacted symbols),
+  and per-symbol resolution evidence would require extending the store API
+  (`cbm_store_bfs_multi` returns no edges). Landed instead as a static
+  honesty note — `graph_support: "heuristic-calls"` + fixed
+  `resolution_caveat` at the response root of both emitters. See
+  FORK_PATCHES §6.
 
 ## P1 — Index freshness made visible
 
@@ -116,7 +136,18 @@ only target the three ways tools in this class die in practice:
 
 ---
 
-## Decision point (config, not code)
+## Decision point (config, not code) — RESOLVED 2026-09-29
+
+**Resolved (fork issue #5, spec T1, commit `7399e8f0`):** the minimal face is
+now `search_graph` + `query_graph` + `get_architecture`. `detect_changes` was
+swapped out per the reasoning below (least trustworthy tool, #2128) and stays
+on the analysis/all profiles pending its credibility repair (B2 landed as a
+static honesty note, above — demotion from the surface was not reverted).
+Membership changed only; the profile enum values and daemon wire bounds were
+untouched.
+
+<details>
+<summary>Original decision text (kept for the record)</summary>
 
 The minimal profile is currently `get_architecture` + `query_graph` +
 `detect_changes`. Community usage ranks `search_graph` second among query
@@ -125,6 +156,8 @@ one (#2128). Revisit whether `detect_changes` stays in the minimal face —
 ideally after B2 lands, or swap it for `search_graph`. This is a profile-list
 decision (`minimal_tools[]` in `src/mcp/mcp.c`, plus the documented
 three-place sync), not a code-architecture change.
+
+</details>
 
 ## Explicitly not doing (restraint list)
 
