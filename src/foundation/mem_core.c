@@ -18,12 +18,13 @@ static void check_owned(const void *block, const char *op);
 
 /* Usable-size query, per platform.
  *
- * Deliberately NOT mi_usable_size: the mimalloc global override is off on
- * macOS (permanently — the two-level namespace aborts on cross-boundary
- * frees), so a pointer from plain malloc there is not a mimalloc block and
- * mi_usable_size would be undefined behaviour on it. Each platform's own query
- * is correct under whichever allocator is actually installed, including when
- * that allocator IS mimalloc via the Linux/MinGW override. */
+ * Deliberately NOT mi_usable_size on macOS: the mimalloc global override is
+ * off there permanently (the two-level namespace aborts on cross-boundary
+ * frees), so a pointer from plain malloc is not a mimalloc block and
+ * mi_usable_size would be undefined behaviour on it. Linux answers through
+ * mimalloc's own malloc_usable_size (link-order override). MinGW answers
+ * through mi_usable_size directly — see the _WIN32 branch below for why the
+ * CRT query is not safe under the linker wrap. */
 #if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
 #include <mimalloc.h>
 #define CBM_BACKING_MALLOC(n) mi_malloc(n)
@@ -35,8 +36,19 @@ static void check_owned(const void *block, const char *op);
 #include <malloc/malloc.h> /* malloc_size */
 #define CBM_USABLE_SIZE(p) malloc_size(p)
 #elif defined(_WIN32)
+#if defined(__MINGW32__) || defined(__MINGW64__)
+/* MinGW links mem_override_win.c with --wrap=malloc/calloc/realloc/free/_msize,
+ * so every block this file measures was served by mimalloc. _msize would
+ * re-derive ownership through mi_is_in_heap_region, which can misroute while
+ * worker threads expand the allocator's page map — charge_size then traps
+ * inside RtlSizeHeap on a fresh block (index_policy suite, 2026-09-29 run).
+ * Ask mimalloc directly, like the CBM_BIND_TS_ALLOCATOR branch above. */
+#include <mimalloc.h>
+#define CBM_USABLE_SIZE(p) mi_usable_size((void *)(p))
+#else
 #include <malloc.h> /* _msize */
 #define CBM_USABLE_SIZE(p) _msize((void *)(p))
+#endif
 #elif defined(__GLIBC__) || defined(__linux__)
 #include <malloc.h> /* malloc_usable_size */
 #define CBM_USABLE_SIZE(p) malloc_usable_size((void *)(p))
@@ -183,6 +195,16 @@ static void class_sub(cbm_mem_class_t cls, size_t bytes, size_t blocks) {
     }
 }
 
+/* gcc 13 models malloc's return as uninitialized storage, so once charge_size
+ * is inlined into cbm_alloc/cbm_calloc the block parameter reads as
+ * maybe-uninitialized — a false positive: every caller assigns block from the
+ * backing allocator first, and the CI compiler (clang) does not emit this.
+ * Keep the suppression local instead of weakening the shared flag set. */
+#if defined(__MINGW32__) || defined(__MINGW64__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
 #ifdef CBM_USABLE_SIZE_UNAVAILABLE
 static size_t charge_size(const void *block, size_t requested) {
     (void)block;
@@ -205,6 +227,10 @@ size_t cbm_mem_usable_size(const void *block) {
     }
     return CBM_USABLE_SIZE(block);
 }
+#endif
+
+#if defined(__MINGW32__) || defined(__MINGW64__)
+#pragma GCC diagnostic pop
 #endif
 
 /* -- Waste-sanitizer hooks (mem_events.h) ---------------------------------
