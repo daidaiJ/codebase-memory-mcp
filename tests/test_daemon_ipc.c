@@ -5133,7 +5133,16 @@ TEST(daemon_ipc_posix_overflow_ancestor_tolerated_only_in_single_uid_ns_issue183
  * blocks unshare(CLONE_NEWUSER) on the Colima container leg; some kernels ship
  * user namespaces disabled. WHAT WAS TRIED when it skips: fork + unshare
  * CLONE_NEWUSER + a 1:1 uid_map write, which the sandbox denied (EPERM). The
- * deterministic decision coverage above is what binds the fix. */
+ * deterministic decision coverage above is what binds the fix.
+ *
+ * TO REPRODUCE IT LOCALLY two things are needed, and the second is easy to
+ * miss: run the container with --security-opt seccomp=unconfined so unshare is
+ * permitted, AND run the suite as a NON-ROOT uid. As root the mapped range
+ * covers uid 0, so root-owned /tmp stays 1:1 inside the namespace, never turns
+ * overflow, and this test passes without ever reaching the branch it exists to
+ * cover -- it passes just as happily with the fix reverted. Under `su tester`
+ * (uid 1001, the shape CI's runner user has) the ancestors do go overflow and
+ * the assertion becomes real. */
 TEST(daemon_ipc_posix_single_uid_userns_real_smoke_issue1830) {
 #if defined(__linux__)
     uid_t host_uid = geteuid();
@@ -5164,9 +5173,20 @@ TEST(daemon_ipc_posix_single_uid_userns_real_smoke_issue1830) {
             _exit(2);
         }
         /* Inside the ns / and /tmp now show the overflow uid. With #1830 the
-         * daemon can still build its private tree there; without it, refused. */
-        bool secured = cbm_daemon_ipc_private_directory_secure(probe);
-        _exit(secured ? 0 : 1);
+         * daemon can still build its private tree there; without it, refused.
+         *
+         * EXEC, do not just call. The overflow uid is derived once per process
+         * (pthread_once) from /proc/self/uid_map, and that state survives
+         * fork(): seven earlier call sites in this suite prime it with the HOST
+         * answer, so a forked child keeps "no overflow uid" and refuses no
+         * matter what its namespace says. That made this test fail on the only
+         * platform where it actually runs (ubuntu-22.04; macOS compile-gates it
+         * out, Colima's seccomp blocks unshare, and 23.10+ restricts
+         * unprivileged userns) -- while looking like a product regression.
+         * Re-exec so the decision is made by a process that STARTED here, which
+         * is also the only shape production ever takes. */
+        (void)execl("/proc/self/exe", "test-runner", "--userns-secure-probe", probe, (char *)NULL);
+        _exit(3); /* exec failed -- distinct from secure(0)/refused(1)/skip(2) */
     }
     if (child < 0) {
         FAIL("fork failed for userns smoke");
@@ -5177,6 +5197,11 @@ TEST(daemon_ipc_posix_single_uid_userns_real_smoke_issue1830) {
     (void)rmdir(probe_dir);
     if (WIFEXITED(status) && WEXITSTATUS(status) == 2) {
         SKIP_PLATFORM("user namespaces unavailable (no CLONE_NEWUSER / seccomp-blocked)");
+    }
+    /* A failed re-exec must never read as a product refusal: 3 is its own code
+     * so a broken probe is a loud harness failure, not a quiet "refused". */
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 3) {
+        FAIL("userns smoke could not re-exec /proc/self/exe for the probe");
     }
     ASSERT_TRUE(WIFEXITED(status));
     ASSERT_EQ(0, WEXITSTATUS(status));
