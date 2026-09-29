@@ -454,3 +454,34 @@ MCP 最小面不可达（该工具不在面上），这类跨工具路由只属�
 权威配方仍见 docs/BUILD_WINDOWS.md）。`cli` 套件另有 12 个**预存**失败
 （hook/README-surface 系列，stash 基线对照确认与本节改动无关，属于全量跑批
 遗留债，不在此节修复）。
+
+## 12. Minimal face grows get_graph_schema (2026-09-30)
+
+**动机**（v0.11.0-fork.2 实测）：最小面缺属性目录发现通道。实测 query_graph
+对未知属性在 WHERE 里静默返回 `total: 0`（权威假阴性）、RETURN 里返回空值
+行。Grok 会话有 cbm skill 兜底属性目录；MCP-only 客户端（2026-09-30 起 Qwen
+Code 也接入了最小面）读不到 skill，写错属性即得无法诊断的假阴性。
+get_graph_schema 是现成的发现通道：默认输出紧凑（json 约 1KB），
+diagnostics=full 约 5.6KB，只读零信任风险，描述已是触发语形态（89 字符），
+且 §11 删掉的 `get_graph_schema(diagnostics=full)` 死指针由此复活。
+
+**逐文件修改点**：
+
+- `src/mcp/mcp.c` — `minimal_tools[]` 增补 `get_graph_schema`（3→4）；
+  `MCP_MINIMAL_SERVER_INSTRUCTIONS` 同步（three→four，补 schema 用途句）。
+- `tests/test_mcp.c` — `server_handle_tools_list_defaults_to_minimal_surface_and_accepts_cursor`
+  断言新契约：计数钉死 4U（两处）、schema 必须在面、负面名单不变
+  （detect_changes / index_repository / manage_adr / ingest_traces 仍不在）。
+- `README.md` / `AGENTS.md` / `skills/cbm/SKILL.md` — 计数与细则同步。
+
+**不升面的候选（评估记录，2026-09-30）**：`trace_path`（baseline 特许 +
+instructions 委托本地工具；一跳 callers 经 Cypher 实测可解，§6 健康摘要修的是
+安全而非升面）、`detect_changes`（#2128 dead-verdict + #480 direction 静默空
+未修，修复是升面前提）、`index_status` / `check_index_coverage`（新鲜度带外
+维护，instructions 已教 out-of-band 路径）、`search_code` / `get_code_snippet` /
+`get_file_outline`（与客户端 Read/grep 重叠）。后续候选（非工具）：
+query_graph 未知属性 fail-loud 校验——同一 silent-empty 家族（#480 同型），
+做了之后 schema 的必要性再降半档。
+
+**验证**：`mcp` 套件全绿（gcc 13.2，SANITIZE=）；`cli` 套件 12 个预存失败
+不变（同 §11 基线）。

@@ -6,7 +6,7 @@
 
 ## 项目一句话定位
 
-**codebase-memory-mcp（fork）**：上游是 C 语言代码库知识图谱 MCP 服务（tree-sitter 解析 → SQLite 图存储 → Cypher 查询）。fork 把它裁剪为「CLI 全量 + MCP 最小面（3 工具）」形态，默认值全面反转为 opt-in，策略支持项目本地配置文件。
+**codebase-memory-mcp（fork）**：上游是 C 语言代码库知识图谱 MCP 服务（tree-sitter 解析 → SQLite 图存储 → Cypher 查询）。fork 把它裁剪为「CLI 全量 + MCP 最小面（4 工具）」形态，默认值全面反转为 opt-in，策略支持项目本地配置文件。
 
 ## 技术栈速览
 
@@ -45,7 +45,7 @@ docs/
 ## fork 补丁约定（改代码前必读）
 
 1. **每个行为差异都有 issue 对应**（fork issues #1-#4），动机和验证矩阵记在 `docs/FORK_PATCHES.md`。新增差异 → 先建 issue 再改代码，同步更新该文档。
-2. **MCP 默认面 = minimal（3 工具）**：改工具面相关代码时，三处必须一致——`mcp.c` 的 `minimal_tools[]`、`cbm_mcp_parse_tool_profile_args` 默认值、`main.c` MCP client 角色。daemon 内部会话保持 ALL（CLI 全量的根基），不要动。
+2. **MCP 默认面 = minimal（4 工具）**：改工具面相关代码时，三处必须一致——`mcp.c` 的 `minimal_tools[]`、`cbm_mcp_parse_tool_profile_args` 默认值、`main.c` MCP client 角色。daemon 内部会话保持 ALL（CLI 全量的根基），不要动。
 3. **fail-loud 是硬约束**：拒绝路径必须非零退出 + 明确 message。禁止静默空结果/静默忽略（上游病灶见 FORK_PATCHES「silent-empty family」）。
 4. **配置键三处同步**：`cli.h` 的 `#define` + `cli.c` 的 `CONFIG_KEYS[]` 表 + 运行时读取点。`config list/get/set/help` 全部从 CONFIG_KEYS 表驱动，漏了表用户就看不见。
 5. **wire protocol**：tool profile 以 uint8 走 context 头，`application.c` 里 client 发送侧和 daemon 校验侧的边界必须同时放宽，否则会话直接被拒。

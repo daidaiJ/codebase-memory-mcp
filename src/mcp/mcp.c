@@ -856,11 +856,16 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
      * trustworthy tool on the surface (upstream #2128 "dead verdict" family)
      * and stays on analysis/all only until its credibility is repaired.
      * get_architecture and query_graph keep their #4 rationale (no
-     * grep/codegraph equivalent). */
+     * grep/codegraph equivalent). get_graph_schema joined 2026-09-30: it is
+     * the property-catalog discovery channel for clients without the cbm
+     * skill — query_graph silently treats unknown properties as empty
+     * results (verified: WHERE f.bogus = 1 yields total:0), and a skill-less
+     * model has no other way to distinguish a typo from a true negative. */
     static const char *const minimal_tools[] = {
         "search_graph",
         "query_graph",
         "get_architecture",
+        "get_graph_schema",
     };
     if (!name) {
         return false;
@@ -1322,11 +1327,12 @@ static const char MCP_SCOUT_SERVER_INSTRUCTIONS[] =
     "cited paths. Findings are provisional.";
 
 static const char MCP_MINIMAL_SERVER_INSTRUCTIONS[] =
-    "This is the minimal tool profile (fork patch): only the three graph tools that beat a "
+    "This is the minimal tool profile (fork patch): only the four graph tools that beat a "
     "grep/symbol-tool baseline are available. search_graph for symbol-level exact discovery "
     "(exact and fuzzy match over qualified names; the second-most-used tool upstream), "
     "query_graph for whole-repo complexity ranking and multi-hop structural patterns, "
-    "get_architecture for orientation, fan-in hotspots, layering, and module clustering. For "
+    "get_architecture for orientation, fan-in hotspots, layering, and module clustering, "
+    "get_graph_schema for the node-label and edge-type catalog query_graph matches against. For "
     "literal text search, single-symbol lookup, call-chain tracing, or exact source, prefer your "
     "local grep and symbol tools — they are faster and see non-symbol content. If the project is "
     "missing or stale, refresh it out-of-band (cbm cli index_repository) instead of calling "

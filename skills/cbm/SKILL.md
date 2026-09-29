@@ -1,11 +1,11 @@
 ---
 name: cbm
-description: 当需要架构概览/模块聚类/复杂度热点排行（codegraph 无架构视图）、commit 影响半径（diff 驱动，codegraph impact 只能符号驱动）、大型或陌生仓库整体理解、全仓符号/调用图查询时，用 codebase-memory-mcp 查询预索引知识图谱（CLI 全量，或 MCP 最小 3 工具 search_graph/query_graph/get_architecture）。小项目或单符号查询直接用 grep/codegraph。
+description: 当需要架构概览/模块聚类/复杂度热点排行（codegraph 无架构视图）、commit 影响半径（diff 驱动，codegraph impact 只能符号驱动）、大型或陌生仓库整体理解、全仓符号/调用图查询时，用 codebase-memory-mcp 查询预索引知识图谱（CLI 全量，或 MCP 最小 4 工具 search_graph/query_graph/get_architecture/get_graph_schema）。小项目或单符号查询直接用 grep/codegraph。
 ---
 
 # cbm（codebase-memory-mcp fork）— 架构级图谱查询（低频重型工具）
 
-定位：**只做 codegraph 和 grep 做不了/不划算的事**。两种形态共享同一份预索引图谱：CLI（`codebase-memory-mcp`，17 工具全量，安装见下节）与 MCP 最小面（3 个只读工具，细则见「MCP 工具面细则」）。shell 可用的会话优先 CLI；受限客户端嵌 MCP 面。
+定位：**只做 codegraph 和 grep 做不了/不划算的事**。两种形态共享同一份预索引图谱：CLI（`codebase-memory-mcp`，17 工具全量，安装见下节）与 MCP 最小面（4 个只读工具，细则见「MCP 工具面细则」）。shell 可用的会话优先 CLI；受限客户端嵌 MCP 面。
 实测依据（2026-09-05，websearch-mcpserver 三场对照实验）：
 
 - **赢的场景**：架构概览（fan-in 热点/边界权重/分层/聚类，grep 需十几次调用）、全仓函数复杂度排行（cognitive 维度 LOC 给不出）、commit 级爆炸半径（唯一 diff 驱动形态）
@@ -75,8 +75,9 @@ MCP `tools/list` 的 description 有意只保留触发语与判读契约（瘦�
 | `search_graph` | 定位定义/调用方、按名称模式扫符号面 | `query`（BM25 关键词）与 `semantic_query`（嵌入相似）互斥；行带 qn/file/lines，degree 列只统计 CALLS/USAGE/CALL_REFERENCE/INHERITS/IMPLEMENTS 五族边 |
 | `query_graph` | 多跳/聚合/复杂度排行/跨服务分析（配方见上节） | 总数是精确值或下界并带截断标记；**用 `next_cursor` 续读**（保持 query/project/graph 不变，format/max_rows 可变）；`graph=missed` 是覆盖盲区文件树，缺席≠完备 |
 | `get_architecture` | 陌生/大型仓库第一站 | 省略 aspects = languages/packages/entry_points；`overview` = 除 file_tree 外的紧凑集；`cycles` 永远 opt-in；`path` 按目录前缀收窄 |
+| `get_graph_schema` | 写 Cypher 前查节点/边目录（无 skill 客户端的属性发现通道） | 默认返回各 label/edge 计数；`diagnostics=full` 追加可查属性清单（约 5.6KB）；query_graph 对未知属性**静默返回空**——拼错属性时 schema 是唯一分辨手段 |
 
-MCP 最小面没有 get_graph_schema / index_status / detect_changes：Cypher 可用属性直接用上节配方 2 的属性表；索引新鲜度与影响半径走 CLI（或 `--tool-profile=all`）。MCP 最小面也不会自动建索引（auto-index 仅 ALL profile 生效），受限客户端场景先用 CLI 建索引。
+MCP 最小面没有 trace_path / index_status / detect_changes：一跳调用链直接用 query_graph 的 Cypher（`MATCH (c:Function)-[:CALLS]->(f:Function …)`）；Cypher 可用属性直接用上节配方 2 的属性表或 `get_graph_schema`；索引新鲜度与影响半径走 CLI（或 `--tool-profile=all`）。MCP 最小面也不会自动建索引（auto-index 仅 ALL profile 生效），受限客户端场景先用 CLI 建索引。
 
 ## 硬规则
 

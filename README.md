@@ -15,7 +15,7 @@
 
 | 维度 | 上游默认 | 本 fork 默认 | 说明 |
 |------|---------|-------------|------|
-| MCP 工具面 | 全部 17 个工具 | **3 个**：`search_graph` / `query_graph` / `get_architecture` | 精确符号发现 + 复杂度排行 + 架构总览；`--tool-profile=all` 恢复全量（fork issue #5：`detect_changes` 换出，待可信度修复） |
+| MCP 工具面 | 全部 17 个工具 | **4 个**：`search_graph` / `query_graph` / `get_architecture` / `get_graph_schema` | 精确符号发现 + 复杂度排行 + 架构总览 + 属性目录发现；`--tool-profile=all` 恢复全量（fork issue #5：`detect_changes` 换出，待可信度修复；`get_graph_schema` 为 2026-09-30 增补，服务无 skill 客户端的 Cypher 属性发现） |
 | `auto_watch` | `true`（会话连接即注册文件监听） | **`false`** | 常驻 watcher 是会话期最大资源户，显式索引工作流下纯冗余 |
 | 日志级别 | role-aware（前端 `warn` / daemon `info`） | 库内静态默认 **`error`** | 上游 v0.10+ 已改 role-aware 启动策略，fork 保留更严的库级兜底 |
 | 内存预算 | RAM × 25%/35%/50%，无上限 | **封顶 2048 MiB** | 32GB 机器上游默认拿 11.4GB；`CBM_MEM_BUDGET_MB` 仍可显式上调 |
@@ -116,11 +116,12 @@ codebase-memory-mcp config reset tools_disabled       # 恢复默认
 
 ## 什么时候用 cbm，什么时候用 grep/符号工具
 
-3 个保留工具各自有 grep/codegraph 复刻不了的证据：
+4 个保留工具各自有 grep/codegraph 复刻不了的证据：
 
 - **`get_architecture`** —— 扇入热点、边界权重、分层、模块聚类，grep 需要十几次调用才能拼出来
 - **`query_graph`** —— 全仓复杂度排行（cognitive 维度），LOC 类指标给不出
 - **`search_graph`** —— 符号级精确发现（fork issue #5 换入；社区使用量第二），grep 容易漏重名/别名场景
+- **`get_graph_schema`** —— 节点/边目录与可查属性发现（2026-09-30 增补）：query_graph 对未知属性静默返回空（实测 `WHERE f.bogus = 1` 得 `total: 0`），无 skill 客户端靠它把「拼错属性」和「真没有」区分开
 
 `detect_changes`（diff 驱动的影响半径）已移出默认面——它是面上可信度最低的工具（上游 #2128「dead verdict」家族），仍保留在 `analysis`/`all` 面，等其可信度修复后再议是否回归。
 

@@ -1936,10 +1936,11 @@ TEST(server_handle_tools_list) {
 
 /* Fork patch (fork issue #5): the default (MINIMAL) tools/list must advertise
  * EXACTLY the reshuffled minimal surface — search_graph / query_graph /
- * get_architecture — and never the tools the surface was curated against
- * (detect_changes) or the maintenance tools that only --tool-profile=all
- * exposes. Count is pinned so a future registration cannot silently widen
- * the default surface again. */
+ * get_architecture / get_graph_schema (2026-09-30 addition: property-catalog
+ * discovery for clients without the cbm skill) — and never the tools the
+ * surface was curated against (detect_changes) or the maintenance tools that
+ * only --tool-profile=all exposes. Count is pinned so a future registration
+ * cannot silently widen the default surface again. */
 TEST(server_handle_tools_list_defaults_to_minimal_surface_and_accepts_cursor) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
@@ -1951,11 +1952,12 @@ TEST(server_handle_tools_list_defaults_to_minimal_surface_and_accepts_cursor) {
     ASSERT_NOT_NULL(strstr(resp, "search_graph"));
     ASSERT_NOT_NULL(strstr(resp, "query_graph"));
     ASSERT_NOT_NULL(strstr(resp, "get_architecture"));
+    ASSERT_NOT_NULL(strstr(resp, "get_graph_schema"));
     ASSERT_NULL(strstr(resp, "detect_changes"));
     ASSERT_NULL(strstr(resp, "index_repository"));
     ASSERT_NULL(strstr(resp, "manage_adr"));
     ASSERT_NULL(strstr(resp, "ingest_traces"));
-    ASSERT_EQ(mcp_response_tool_count(resp), 3U);
+    ASSERT_EQ(mcp_response_tool_count(resp), 4U);
     free(resp);
 
     resp = cbm_mcp_server_handle(
@@ -1977,7 +1979,7 @@ TEST(server_handle_tools_list_defaults_to_minimal_surface_and_accepts_cursor) {
     ASSERT_NOT_NULL(resp);
     size_t total_tools = mcp_response_tool_count(resp);
     free(resp);
-    ASSERT_EQ(total_tools, 3U);
+    ASSERT_EQ(total_tools, 4U);
 
     char last_page_req[160];
     snprintf(last_page_req, sizeof(last_page_req),
@@ -1994,7 +1996,7 @@ TEST(server_handle_tools_list_defaults_to_minimal_surface_and_accepts_cursor) {
     /* ...and a page that does have tools after it MUST advertise the cursor,
      * so the assertion above cannot pass merely because paging never emits.
      * Paging only engages above MCP_TOOLS_PAGE_SIZE (8), which the pinned
-     * 3-tool MINIMAL surface can never reach, so this half of the contract is
+     * 4-tool MINIMAL surface can never reach, so this half of the contract is
      * asserted against an ALL-surface server where the page actually splits. */
     {
         cbm_mcp_server_t *full = test_server_all_surface();
