@@ -106,13 +106,13 @@ gcc -fsyntax-only -std=c11 -Isrc -Ivendored -Ivendored/sqlite3 \
 
 ## 🔄 Handoff 摘要
 
-### minimal-swap-t2-t7 — in-progress
+### minimal-swap-t2-t7 — in-progress（约 85%）
 
-- **当前状态：** in-progress（T1 已提交且 commit 内容复核通过；污染期 T2 残留已执行 `git checkout -- src/mcp/mcp.c` 丢弃；T2-T7 + Windows 构建说明未开始）
-- **关键证据：** T1 commit `7399e8f0`（minimal 面换血，git 双通道验证 + 新会话 `git show` 内容复核通过）；上一会话环境伪造事故已排查定位（见 handoff §4）
-- **验收标准：** T2-T7 每 Ticket 独立 commit + 维护者本机测试全绿 + 构建说明成文（agent 不跑测试）
-- **详情指针：** [`.handoff/minimal-swap-t2-t7.md`](.handoff/minimal-swap-t2-t7.md)（唯一权威任务源仍是 `.plan/spec.md`）
+- **当前状态：** T2-T6 已完成并各自独立 commit（c9f5bcbf / 3037dd6f / f31f9a87 / 410648ef / da13a3d1）；剩 T7（fork issue #10 惊群防护+freshness）+ Windows 构建说明
+- **关键证据：** 每 Ticket 同步 FORK_PATCHES §5-§8 + tests/test_mcp.c 新测试；T4 顺带修复 T1 遗留的 RUN_TEST 注册断链；开场双跑核验一致、T1 `git show` 复核通过
+- **验收标准：** T7 独立 commit + 维护者本机构建/测试全绿（agent 不跑测试）+ Windows 构建说明成文 + 完成后摘除本摘要块
+- **详情指针：** [`.handoff/minimal-swap-t2-t7.md`](.handoff/minimal-swap-t2-t7.md)（唯一权威任务源仍是 `.plan/spec.md`；tree 标量值加引号、c1/c2 cursor 语义等已踩坑见 handoff §8）
 
 ### 未验证事项
-- [ ] 全部代码/测试改动未经过任何构建或测试（agent 不跑，维护者本机验证）
-- [ ] T1 commit 文件内容完整性（新会话用 `git show 7399e8f0` 复核）
+- [ ] T2-T6 全部代码/测试改动未经任何构建或测试（agent 不跑，维护者本机验证；T6 动了 cursor 契约，务必实跑 test_mcp 全量）
+- [ ] T7 与 Windows 构建说明未开始（handoff §6 有 spec 锚点与约束摘录）
