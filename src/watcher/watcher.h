@@ -146,6 +146,82 @@ int cbm_watcher_poll_interval_ms(int file_count);
  * Negative inputs are treated as zero. */
 int cbm_watcher_index_backoff_ms(int interval_ms, int consecutive_failures);
 
+/* ── Poll decision (#10: two-round confirmation + cooldown) ─────── */
+
+/* What poll_project should do with one round of observations. */
+typedef enum {
+    CBM_WATCH_DECISION_IDLE = 0, /* nothing to do; any in-flight confirmation is obsolete */
+    CBM_WATCH_DECISION_WAIT,     /* a dirty change is staged; wait for the next round */
+    CBM_WATCH_DECISION_INDEX,    /* run the index callback now */
+} cbm_watch_decision_t;
+
+/* One round of observations, already reduced against the committed baselines.
+ * Pure input: no watcher, store, or git state — this is what makes the
+ * confirmation state machine unit-testable. */
+typedef struct {
+    bool head_moved;       /* HEAD differs from the committed baseline (commit/checkout/pull) */
+    bool dirty_changed;    /* observed dirty signature differs from the committed one */
+    bool in_cooldown;      /* within the post-success cooldown window */
+    bool pending_valid;    /* a previous round staged a signature awaiting confirmation */
+    uint64_t observed_sig; /* dirty signature observed this round */
+    uint64_t pending_sig;  /* signature staged by the previous round */
+} cbm_watch_poll_input_t;
+
+/* The decision plus the pending-confirmation state to apply afterwards.
+ * pending_refreshed is true whenever pending_sig was (re)opened this round —
+ * the caller uses it to restart its pending-since timestamp. */
+typedef struct {
+    cbm_watch_decision_t decision;
+    bool pending_valid;
+    uint64_t pending_sig;
+    bool pending_refreshed;
+} cbm_watch_poll_output_t;
+
+/* Decide one poll round. Pure function; exported so the confirmation
+ * semantics (two equal rounds trigger, a mid-confirmation change resets,
+ * the cooldown holds everything, a HEAD move triggers in one round) can be
+ * asserted directly instead of inferred from poll behavior.
+ *
+ * Contract:
+ *   - no change at all         → IDLE, pending cleared (tree is back at baseline)
+ *   - HEAD moved (no cooldown) → INDEX in a single round: a commit is an
+ *     explicit action, unlike ambient dirty-state churn
+ *   - dirty change             → staged as pending on the first round, INDEX
+ *     only when the NEXT round observes the same signature again; a different
+ *     signature restarts the window
+ *   - in cooldown              → never INDEX; dirty changes only refresh the
+ *     staged signature (a HEAD move stays pending until the cooldown ends —
+ *     the move is never lost, the baseline stays uncommitted) */
+void cbm_watcher_decide_poll(const cbm_watch_poll_input_t *input, cbm_watch_poll_output_t *output);
+
+/* ── Freshness (#10: what index_status reports) ─────────────────── */
+
+/* Per-project freshness snapshot for index_status. Aggregate-scope only:
+ * the dirty signatures are whole-tree hashes, never per-file mtimes (#1714),
+ * and HEAD plays no part in the staleness judgment (#1213). */
+typedef struct {
+    bool valid; /* project is watched, is git, and has observed at least one poll */
+    /* Wall-clock ms of the last watcher-triggered successful index; 0 when
+     * the watcher has not indexed this project since it was watched. */
+    int64_t last_index_success_ms;
+    uint64_t indexed_sig;  /* dirty signature committed by the last successful index (0 = clean tree) */
+    uint64_t observed_sig; /* latest observed dirty signature */
+    bool pending;          /* a change is staged awaiting confirmation/cooldown */
+    int64_t pending_since_ms;
+} cbm_watcher_freshness_t;
+
+/* Fill `out` for a watched project. Returns false (and leaves out->valid
+ * false) when the project is not watched or has no observation yet —
+ * index_status omits the freshness block in that case, which is the honest
+ * answer for auto_watch=off: no watcher, no signal.
+ *
+ * Memory visibility: read under projects_lock, but poll_project WRITES these
+ * fields outside that lock (same discipline as cbm_watcher_index_failure_count
+ * — see that comment). Single-threaded callers between poll cycles always see
+ * current values; a live poll may serve a slightly stale snapshot. */
+bool cbm_watcher_get_freshness(cbm_watcher_t *w, const char *project_name,
+                               cbm_watcher_freshness_t *out);
+
 /* Classify a stat() errno observed on a watched project root: returns true
  * only for values that mean the root itself is gone (ENOENT, ENOTDIR) and
  * may count toward stale-root pruning (#286). Any other failure (EACCES,

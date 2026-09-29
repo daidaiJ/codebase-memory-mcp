@@ -13,6 +13,12 @@
  *   - Last poll time + adaptive interval
  *   - Whether the project is a git repo
  *
+ * Trigger economics (#10): a dirty-state change needs TWO consecutive polls
+ * observing the same signature before it indexes (two-round confirmation),
+ * a successful index opens a per-project cooldown (30s default,
+ * CBM_WATCH_COOLDOWN_S), and HEAD moves trigger in a single round. A
+ * whole-tree freshness view of this state is exposed for index_status.
+ *
  * Baselines are committed only after a successful reindex; busy-skips and
  * failed runs leave them untouched so the change is retried, never lost.
  *
@@ -76,6 +82,22 @@ typedef struct {
     uint64_t last_dirty_sig;       /* committed dirty-state signature */
     uint64_t pending_dirty_sig;    /* observed at check time */
     char pending_head[CBM_SZ_128]; /* HEAD observed at check time */
+    /* Two-round confirmation (#10): a dirty-state change is indexed only when
+     * the NEXT poll observes the same signature again — an editor writing a
+     * burst of files produces several distinct signatures in a row, and each
+     * near-full-cost delta (upstream #867) should run once, after the burst
+     * settles. confirm_* is that staging window; pending_since_ms timestamps
+     * it for the freshness report. A HEAD move bypasses the window (commits
+     * are explicit), the post-success cooldown does not. */
+    bool confirm_valid;      /* a signature is staged awaiting the next round */
+    uint64_t confirm_sig;    /* the staged signature */
+    int64_t pending_since_ms; /* cbm_now_ms() when confirm_sig was staged (0 = none) */
+    /* Post-success cooldown (#10): a successful index sets a deadline during
+     * which no trigger fires and dirty changes only restage. Constant default,
+     * CBM_WATCH_COOLDOWN_S override; 0 disables. */
+    int64_t cooldown_until_ms;    /* cbm_now_ms() deadline (0 = none) */
+    int64_t last_index_success_ms; /* cbm_now_ms() of the last successful index (0 = none) */
+    bool observed_once;            /* true after the first completed dirty-signature probe */
     /* Consecutive hard index failures (index_fn < 0). A hard error is
      * usually persistent — a poisoned coordination endpoint, an unreadable
      * DB — so retrying it at the plain poll interval re-forks a worker that
@@ -141,6 +163,11 @@ struct cbm_watcher {
 #define MISSING_ROOT_DELETE_AFTER 3
 #define PRUNE_GRACE_DEFAULT_S 600 /* 10 min; override: CBM_WATCHER_PRUNE_GRACE_S */
 
+/* Post-success cooldown (#10): watcher-triggered deltas cost near-full-index
+ * money (upstream #867), so after one lands, further triggers hold off for
+ * this long and only restage. Override: CBM_WATCH_COOLDOWN_S (0 disables). */
+#define WATCH_COOLDOWN_DEFAULT_S 30
+
 /* Sleep chunk for responsive shutdown (ms) */
 #define SLEEP_CHUNK_MS 500
 
@@ -189,6 +216,77 @@ int cbm_watcher_poll_interval_ms(int file_count) {
         ms = POLL_MAX_MS;
     }
     return ms;
+}
+
+/* ── Poll decision (#10) ────────────────────────────────────────── */
+
+/* Cooldown length in seconds. Read on each use so tests/operators can adjust
+ * via setenv without a restart — same convention as prune_grace_s above. */
+static long watch_cooldown_s(void) {
+    const char *raw = getenv("CBM_WATCH_COOLDOWN_S");
+    if (raw && raw[0]) {
+        errno = 0;
+        char *end = NULL;
+        long v = strtol(raw, &end, 10);
+        if (errno == 0 && end != raw && *end == '\0' && v >= 0) {
+            return v;
+        }
+        /* Unparseable / negative → fall through to the safe default. */
+    }
+    return WATCH_COOLDOWN_DEFAULT_S;
+}
+
+void cbm_watcher_decide_poll(const cbm_watch_poll_input_t *input, cbm_watch_poll_output_t *output) {
+    memset(output, 0, sizeof(*output));
+    /* Default: carry the staged signature through unchanged. */
+    output->pending_valid = input->pending_valid;
+    output->pending_sig = input->pending_sig;
+
+    if (!input->dirty_changed && !input->head_moved) {
+        /* The tree is back at the committed baseline (or never left it): an
+         * in-flight confirmation is obsolete — the state it was confirming
+         * no longer needs indexing. */
+        output->pending_valid = false;
+        output->decision = CBM_WATCH_DECISION_IDLE;
+        return;
+    }
+    if (input->in_cooldown) {
+        /* Cooldown gates EVERY trigger, HEAD moves included: each delta costs
+         * near-full-index money (#867), and a baseline left uncommitted is
+         * never lost — the move re-triggers once the cooldown ends. Dirty
+         * changes only restage. */
+        if (input->dirty_changed) {
+            output->pending_valid = true;
+            output->pending_sig = input->observed_sig;
+            output->pending_refreshed =
+                !input->pending_valid || input->pending_sig != input->observed_sig;
+        }
+        output->decision = CBM_WATCH_DECISION_WAIT;
+        return;
+    }
+    if (input->head_moved) {
+        /* Commits are explicit actions: single round, no confirmation. */
+        output->decision = CBM_WATCH_DECISION_INDEX;
+        return;
+    }
+    /* Dirty-state change only. First sight stages it; the next round must
+     * observe the SAME signature before the index runs. */
+    if (!input->pending_valid) {
+        output->pending_valid = true;
+        output->pending_sig = input->observed_sig;
+        output->pending_refreshed = true;
+        output->decision = CBM_WATCH_DECISION_WAIT;
+        return;
+    }
+    if (input->pending_sig == input->observed_sig) {
+        output->decision = CBM_WATCH_DECISION_INDEX;
+        return;
+    }
+    /* Still churning (a different signature mid-confirmation): restage and
+     * restart the window. */
+    output->pending_sig = input->observed_sig;
+    output->pending_refreshed = true;
+    output->decision = CBM_WATCH_DECISION_WAIT;
 }
 
 /* ── Git helpers ────────────────────────────────────────────────── */
@@ -1210,6 +1308,30 @@ int cbm_watcher_watch_count(cbm_watcher_t *w) {
     return count;
 }
 
+bool cbm_watcher_get_freshness(cbm_watcher_t *w, const char *project_name,
+                               cbm_watcher_freshness_t *out) {
+    if (!w || !project_name || !out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    cbm_mutex_lock(&w->projects_lock);
+    project_state_t *s = cbm_ht_get(w->projects, project_name);
+    /* Honest absence: no watch, non-git (never probed), baseline pending, or
+     * no completed dirty-signature observation yet → no signal to report.
+     * index_status omits the freshness block for all of these. */
+    bool valid = s && s->is_git && s->baseline_done && s->observed_once;
+    if (valid) {
+        out->valid = true;
+        out->last_index_success_ms = s->last_index_success_ms;
+        out->indexed_sig = s->last_dirty_sig;
+        out->observed_sig = s->pending_dirty_sig;
+        out->pending = s->confirm_valid;
+        out->pending_since_ms = s->pending_since_ms;
+    }
+    cbm_mutex_unlock(&w->projects_lock);
+    return valid;
+}
+
 /* ── Single poll cycle ──────────────────────────────────────────── */
 
 /* Init baseline for a project: check if git, get HEAD, count files */
@@ -1289,21 +1411,25 @@ static bool init_baseline(cbm_watcher_t *w, project_state_t *s) {
     return true;
 }
 
-/* Check if a project has changes. Returns true if reindex needed.
+/* Observations from one check, reduced against the committed baselines. */
+typedef struct {
+    bool head_moved;    /* HEAD differs from last_head */
+    bool dirty_changed; /* observed signature differs from last_dirty_sig */
+    uint64_t observed_sig;
+} wt_check_result_t;
+
+/* Check if a project has changes. Reduces the round's git observations
+ * against the committed baselines; the DECISION (two-round confirmation,
+ * cooldown) lives in cbm_watcher_decide_poll.
  * Must NOT mutate the committed baselines (last_head, last_dirty_sig):
  * poll_project commits them only after a SUCCESSFUL reindex so that
  * busy-skips and failed runs retry instead of silently losing the change
  * (#937). Observations are staged in the pending_* fields. */
-static bool check_changes(cbm_watcher_t *w, project_state_t *s, bool *changed_out) {
-    if (!changed_out) {
-        return false;
-    }
-    *changed_out = false;
+static bool check_changes(cbm_watcher_t *w, project_state_t *s, wt_check_result_t *out) {
+    memset(out, 0, sizeof(*out));
     if (!s->is_git) {
         return true;
     }
-
-    bool changed = false;
 
     /* Check HEAD movement (commit, checkout, pull) */
     s->pending_head[0] = '\0';
@@ -1314,7 +1440,7 @@ static bool check_changes(cbm_watcher_t *w, project_state_t *s, bool *changed_ou
             /* First observed HEAD: adopt as baseline, not a change. */
             snprintf(s->last_head, sizeof(s->last_head), "%s", head);
         } else if (strcmp(head, s->last_head) != 0) {
-            changed = true;
+            out->head_moved = true;
         }
         snprintf(s->pending_head, sizeof(s->pending_head), "%s", head);
     } else if (head_status != WATCHER_GIT_COMMAND_FAILED) {
@@ -1335,11 +1461,12 @@ static bool check_changes(cbm_watcher_t *w, project_state_t *s, bool *changed_ou
         return false;
     }
     if (sig != s->last_dirty_sig) {
-        changed = true;
+        out->dirty_changed = true;
     }
+    out->observed_sig = sig;
     s->pending_dirty_sig = sig;
+    s->observed_once = true;
 
-    *changed_out = changed;
     return true;
 }
 
@@ -1477,12 +1604,40 @@ static void poll_project(const char *key, void *val, void *ud) {
         return;
     }
 
-    /* Check for changes */
-    bool changed = false;
-    if (!check_changes(ctx->w, s, &changed)) {
+    /* Check for changes and apply the #10 decision state machine. */
+    wt_check_result_t chk;
+    if (!check_changes(ctx->w, s, &chk)) {
         return;
     }
-    if (!changed) {
+    uint64_t now_ms = cbm_now_ms();
+    /* The env is re-read here so CBM_WATCH_COOLDOWN_S acts as a live switch:
+     * 0 disables the cooldown even for a deadline an earlier run of the
+     * daemon set (same read-on-each-use convention as the prune grace). */
+    long cooldown_s = watch_cooldown_s();
+    cbm_watch_poll_input_t in = {
+        .head_moved = chk.head_moved,
+        .dirty_changed = chk.dirty_changed,
+        .in_cooldown =
+            cooldown_s > 0 && s->cooldown_until_ms != 0 && (int64_t)now_ms < s->cooldown_until_ms,
+        .pending_valid = s->confirm_valid,
+        .pending_sig = s->confirm_sig,
+        .observed_sig = chk.observed_sig,
+    };
+    cbm_watch_poll_output_t out;
+    cbm_watcher_decide_poll(&in, &out);
+
+    if (out.decision == CBM_WATCH_DECISION_IDLE) {
+        s->confirm_valid = false;
+        s->pending_since_ms = 0;
+        s->next_poll_ns = ctx->now + ((int64_t)s->interval_ms * US_PER_MS);
+        return;
+    }
+    if (out.decision == CBM_WATCH_DECISION_WAIT) {
+        s->confirm_valid = out.pending_valid;
+        s->confirm_sig = out.pending_sig;
+        if (out.pending_refreshed) {
+            s->pending_since_ms = (int64_t)now_ms;
+        }
         s->next_poll_ns = ctx->now + ((int64_t)s->interval_ms * US_PER_MS);
         return;
     }
@@ -1508,6 +1663,13 @@ static void poll_project(const char *key, void *val, void *ud) {
                 snprintf(s->last_head, sizeof(s->last_head), "%s", s->pending_head);
             }
             s->last_dirty_sig = s->pending_dirty_sig;
+            /* #10: the confirmation window is closed and a cooldown begins;
+             * further dirty churn only restages until it expires. */
+            s->confirm_valid = false;
+            s->pending_since_ms = 0;
+            s->last_index_success_ms = (int64_t)now_ms;
+            s->cooldown_until_ms =
+                cooldown_s > 0 ? (int64_t)now_ms + cooldown_s * CBM_MSEC_PER_SEC : 0;
             /* Refresh file count for interval */
             int file_count = 0;
             if (git_file_count(ctx->w, s, &file_count) == WATCHER_GIT_OK) {

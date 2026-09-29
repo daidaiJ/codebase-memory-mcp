@@ -110,6 +110,8 @@ codebase-memory-mcp config reset tools_disabled       # 恢复默认
 | `CBM_LOG_LEVEL` | `error` | `debug`/`info`/`warn`/`error`/`none` 或 `0`-`4` |
 | `CBM_MEM_BUDGET_MB` | RAM 分数，**封顶 2048** | 显式设置可超过封顶（上限为物理内存） |
 | `CBM_DACL_HARDENING` | *(未设，即跳过)* | Windows 专用，fork：默认跳过缓存目录的不可信 ACE 遍历（`D:\tool-cli` 这类祖先目录带宽松 ACL 也照常启动，属主校验仍生效）。多用户/终端服务器主机设 `=1` 开回严格检查 |
+| `CBM_WATCH_COOLDOWN_S` | `30` | watcher 成功索引后的冷却秒数（fork issue #10）：窗口内不触发，脏变更只暂存；`0` 关闭。commit 单轮即触发，不受双轮确认限制 |
+| `CBM_WATCHER_PRUNE_GRACE_S` | `600` | watched 项目根目录持续缺失多久后清理其缓存 DB |
 | `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | 索引与配置存储目录 |
 
 ## 什么时候用 cbm，什么时候用 grep/符号工具

@@ -19971,6 +19971,180 @@ TEST(mcp_auto_watch_false_skips_watcher_on_connect) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ *  #10 — index_status freshness
+ *
+ *  The daemon watcher's per-project state surfaces in index_status as an
+ *  aggregate-scope freshness block: indexed_at (the project row's generation
+ *  timestamp — never per-file mtime, #1714; never Branch.head_sha, #1213),
+ *  workspace_dirty, index_pending, stale. The block is ABSENT when there is
+ *  no watcher signal — unwatched (auto_watch=off) is the honest "no data".
+ * ══════════════════════════════════════════════════════════════════ */
+
+static int freshness_index_mode = 0; /* 0 = index succeeds, 1 = busy-skip */
+
+static int freshness_index_cb(const char *name, const char *path, void *ud) {
+    (void)name;
+    (void)path;
+    (void)ud;
+    return freshness_index_mode;
+}
+
+static int freshness_git(const char *dir, const char *args) {
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "git -C \"%s\" -c user.name=t -c user.email=t@t.io "
+             "-c init.defaultBranch=master -c commit.gpgsign=false %s",
+             dir, args);
+    return system(cmd);
+}
+
+/* Parse the index_status response and return the freshness object (borrowed
+ * from doc). Caller frees the doc. */
+static yyjson_val *freshness_block(const char *inner, yyjson_doc **doc_out) {
+    *doc_out = yyjson_read(inner, strlen(inner), 0);
+    if (!*doc_out) {
+        return NULL;
+    }
+    return yyjson_obj_get(yyjson_doc_get_root(*doc_out), "freshness");
+}
+
+TEST(tool_index_status_freshness_fresh_pending_reindexed_and_absent) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_mcp_frsh_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    if (freshness_git(tmpdir, "init -q") != 0) {
+        th_rmtree(tmpdir);
+        FAIL("git init failed");
+    }
+    {
+        char p[300];
+        snprintf(p, sizeof(p), "%s/file.txt", tmpdir);
+        th_write_file(p, "hello\n");
+    }
+    if (freshness_git(tmpdir, "add file.txt") != 0 ||
+        freshness_git(tmpdir, "commit -q -m init") != 0) {
+        th_rmtree(tmpdir);
+        FAIL("git commit failed");
+    }
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "fresh-proj", tmpdir), CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, "fresh-proj");
+
+    cbm_watcher_t *watcher = cbm_watcher_new(store, freshness_index_cb, NULL);
+    ASSERT_NOT_NULL(watcher);
+    cbm_mcp_server_set_watcher(srv, watcher);
+    ASSERT_TRUE(cbm_watcher_watch(watcher, "fresh-proj", tmpdir));
+    freshness_index_mode = 0;
+
+    /* Baseline + first clean observation → FRESH: nothing dirty, nothing
+     * pending, index matches what was observed. */
+    (void)cbm_watcher_poll_once(watcher);
+    cbm_watcher_touch(watcher, "fresh-proj");
+    (void)cbm_watcher_poll_once(watcher);
+
+    char *response =
+        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"fresh-proj\",\"format\":\"json\"}");
+    ASSERT_NOT_NULL(response);
+    char *inner = extract_text_content(response);
+    free(response);
+    ASSERT_NOT_NULL(inner);
+    yyjson_doc *doc = NULL;
+    yyjson_val *fresh = freshness_block(inner, &doc);
+    ASSERT_NOT_NULL(fresh);
+    ASSERT_TRUE(yyjson_is_str(yyjson_obj_get(fresh, "indexed_at")));
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(fresh, "workspace_dirty")));
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(fresh, "index_pending")));
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(fresh, "stale")));
+    yyjson_doc_free(doc);
+    free(inner);
+
+    /* Dirty the tree → first round stages it: PENDING. */
+    {
+        char p[300];
+        snprintf(p, sizeof(p), "%s/file.txt", tmpdir);
+        th_append_file(p, "dirty\n");
+    }
+    cbm_watcher_touch(watcher, "fresh-proj");
+    (void)cbm_watcher_poll_once(watcher);
+
+    response =
+        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"fresh-proj\",\"format\":\"json\"}");
+    ASSERT_NOT_NULL(response);
+    inner = extract_text_content(response);
+    free(response);
+    ASSERT_NOT_NULL(inner);
+    fresh = freshness_block(inner, &doc);
+    ASSERT_NOT_NULL(fresh);
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(fresh, "workspace_dirty")));
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(fresh, "index_pending")));
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(fresh, "stale")));
+    yyjson_doc_free(doc);
+    free(inner);
+
+    /* Confirmed round with a busy pipeline: the change stays pending (#937
+     * at-least-once) — still PENDING. */
+    freshness_index_mode = 1;
+    cbm_watcher_touch(watcher, "fresh-proj");
+    (void)cbm_watcher_poll_once(watcher);
+
+    response =
+        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"fresh-proj\",\"format\":\"json\"}");
+    ASSERT_NOT_NULL(response);
+    inner = extract_text_content(response);
+    free(response);
+    ASSERT_NOT_NULL(inner);
+    fresh = freshness_block(inner, &doc);
+    ASSERT_NOT_NULL(fresh);
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(fresh, "index_pending")));
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(fresh, "stale")));
+    yyjson_doc_free(doc);
+    free(inner);
+
+    /* Successful reindex commits the observed signature: back to in-sync —
+     * the dirty TREE was what got indexed, so workspace_dirty stays true but
+     * stale/pending clear. */
+    freshness_index_mode = 0;
+    cbm_watcher_touch(watcher, "fresh-proj");
+    (void)cbm_watcher_poll_once(watcher);
+
+    response =
+        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"fresh-proj\",\"format\":\"json\"}");
+    ASSERT_NOT_NULL(response);
+    inner = extract_text_content(response);
+    free(response);
+    ASSERT_NOT_NULL(inner);
+    fresh = freshness_block(inner, &doc);
+    ASSERT_NOT_NULL(fresh);
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(fresh, "workspace_dirty")));
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(fresh, "index_pending")));
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(fresh, "stale")));
+    yyjson_doc_free(doc);
+    free(inner);
+
+    /* Unwatched (auto_watch=off shape) → the block is OMITTED, not faked. */
+    cbm_watcher_unwatch(watcher, "fresh-proj");
+    response =
+        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"fresh-proj\",\"format\":\"json\"}");
+    ASSERT_NOT_NULL(response);
+    inner = extract_text_content(response);
+    free(response);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NULL(strstr(inner, "\"freshness\""));
+    free(inner);
+
+    cbm_watcher_free(watcher);
+    cbm_mcp_server_free(srv);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  #1466 / #713 — the auto_index_limit guard
  *
  *  #1466: autoindex.skip must report the effective numeric limit.
@@ -21459,6 +21633,7 @@ SUITE(mcp) {
     /* auto_watch gate (distilled from PR #625) */
     RUN_TEST(mcp_auto_watch_default_registers_watcher_on_connect);
     RUN_TEST(mcp_auto_watch_false_skips_watcher_on_connect);
+    RUN_TEST(tool_index_status_freshness_fresh_pending_reindexed_and_absent);
     RUN_TEST(mcp_auto_watch_false_skips_supervised_autoindex_issue853);
     RUN_TEST(autoindex_skip_reports_numeric_limit_issue1466);
     RUN_TEST(autoindex_limit_guards_non_git_root_issue713);

@@ -6939,6 +6939,26 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
         add_coverage_report(doc, root, store, project, have_proj_info ? proj_info.indexed_at : NULL,
                             coverage_samples);
         add_maintenance_report(doc, root, store);
+        /* Freshness from the daemon watcher (fork #10). Absent whenever there
+         * is no signal — no watcher handle, auto_watch=off (the project is not
+         * in the watch table), non-git, or no completed observation yet.
+         * Anchors are aggregate-scope only: indexed_at comes from the project
+         * row's generation timestamp, and the dirty comparison is the
+         * watcher's whole-tree signature — never per-file mtime (#1714) and
+         * never Branch.head_sha (#1213). */
+        if (srv->watcher) {
+            cbm_watcher_freshness_t fr;
+            if (cbm_watcher_get_freshness(srv->watcher, project, &fr)) {
+                yyjson_mut_val *fresh = yyjson_mut_obj(doc);
+                yyjson_mut_obj_add_val(doc, root, "freshness", fresh);
+                yyjson_mut_obj_add_strcpy(doc, fresh, "indexed_at",
+                                          proj_info.indexed_at ? proj_info.indexed_at : "");
+                yyjson_mut_obj_add_bool(doc, fresh, "workspace_dirty", fr.observed_sig != 0);
+                yyjson_mut_obj_add_bool(doc, fresh, "index_pending", fr.pending);
+                yyjson_mut_obj_add_bool(
+                    doc, fresh, "stale", fr.pending || fr.observed_sig != fr.indexed_sig);
+            }
+        }
         safe_str_free(&proj_info.name);
         safe_str_free(&proj_info.indexed_at);
         safe_str_free(&proj_info.root_path);

@@ -48,6 +48,15 @@ static const char *wt_path(char *buf, size_t n, const char *dir, const char *rel
     return buf;
 }
 
+/* #10: a dirty-state change triggers only after a SECOND poll observes the
+ * same signature (two-round confirmation); commits trigger in one. Tests
+ * covering the dirty path call this between "make dirty + poll" and the
+ * reindex assertion. */
+static int wt_confirm_poll(cbm_watcher_t *w, const char *project) {
+    cbm_watcher_touch(w, project);
+    return cbm_watcher_poll_once(w);
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  ADAPTIVE INTERVAL
  * ══════════════════════════════════════════════════════════════════ */
@@ -1414,6 +1423,8 @@ TEST(watcher_monorepo_subdir_ignores_sibling_changes) {
     }
     cbm_watcher_touch(w, "pkg-a");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, after_baseline); /* #10: staged */
+    wt_confirm_poll(w, "pkg-a");
     ASSERT_EQ(index_call_count, after_baseline + 1);
 
     cbm_watcher_free(w);
@@ -1495,9 +1506,11 @@ TEST(watcher_detects_dirty_worktree) {
         th_append_file(_p, "modified\n");
     }
 
-    /* Poll → should detect dirty worktree */
+    /* Poll → should detect dirty worktree (two rounds per #10) */
     cbm_watcher_touch(w, "dirty-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* first round only stages */
+    wt_confirm_poll(w, "dirty-repo");
     ASSERT_EQ(index_call_count, 1);
 
     /* Cleanup */
@@ -1541,10 +1554,12 @@ TEST(watcher_identical_watch_preserves_dirty_baseline) {
 
     cbm_watcher_touch(w, "same-root-repo");
 
-    /* An identical registration must preserve the established baseline. */
+    /* An identical registration must preserve the established baseline —
+     * including the staged confirmation window. */
     cbm_watcher_watch(w, "same-root-repo", tmpdir);
     ASSERT_EQ(cbm_watcher_watch_count(w), 1);
-    ASSERT_EQ(cbm_watcher_poll_once(w), 1);
+    ASSERT_EQ(cbm_watcher_poll_once(w), 0); /* #10: first round stages */
+    ASSERT_EQ(wt_confirm_poll(w, "same-root-repo"), 1); /* second round fires */
     ASSERT_EQ(index_call_count, 1);
 
     cbm_watcher_free(w);
@@ -1591,6 +1606,8 @@ TEST(watcher_detects_new_file) {
     /* Touch to bypass interval, then poll */
     cbm_watcher_touch(w, "newf-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* #10: staged */
+    wt_confirm_poll(w, "newf-repo");
     ASSERT_EQ(index_call_count, 1); /* should detect untracked file */
 
     /* Cleanup */
@@ -1760,6 +1777,8 @@ TEST(watcher_own_artifact_export_does_not_retrigger_issue1953) {
     }
     cbm_watcher_touch(w, "wt-1953");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 1); /* #10: staged */
+    wt_confirm_poll(w, "wt-1953");
     ASSERT_EQ(index_call_count, 2);
 
     cbm_watcher_free(w);
@@ -1804,7 +1823,8 @@ TEST(watcher_dirty_state_reindexes_once_issue937) {
     cbm_watcher_poll_once(w);
     ASSERT_EQ(index_call_count, 0);
 
-    /* Dirty the tree once (uncommitted modification). */
+    /* Dirty the tree once (uncommitted modification). Two rounds (#10):
+     * the first stages the new state, the confirming round indexes once. */
     {
         char _p[1024];
         snprintf(_p, sizeof(_p), "%s/file.txt", tmpdir);
@@ -1812,6 +1832,8 @@ TEST(watcher_dirty_state_reindexes_once_issue937) {
     }
     cbm_watcher_touch(w, "amp-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "amp-repo");
     ASSERT_EQ(index_call_count, 1); /* new dirty state → one reindex */
 
     /* Idle polls on the SAME dirty state must not re-trigger. */
@@ -1829,6 +1851,8 @@ TEST(watcher_dirty_state_reindexes_once_issue937) {
     }
     cbm_watcher_touch(w, "amp-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 1); /* staged */
+    wt_confirm_poll(w, "amp-repo");
     ASSERT_EQ(index_call_count, 2);
 
     /* Same-state polls stay quiet again. */
@@ -1841,6 +1865,8 @@ TEST(watcher_dirty_state_reindexes_once_issue937) {
     wt_git(tmpdir, "checkout -- file.txt");
     cbm_watcher_touch(w, "amp-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 2); /* staged */
+    wt_confirm_poll(w, "amp-repo");
     ASSERT_EQ(index_call_count, 3);
 
     /* Stable clean tree: quiet. */
@@ -2233,10 +2259,13 @@ TEST(watcher_multiple_projects) {
         th_append_file(_p, "modified\n");
     }
 
-    /* Poll — only A should trigger */
+    /* Poll — only A should trigger (two rounds per #10) */
     cbm_watcher_touch(w, "projA");
     cbm_watcher_touch(w, "projB");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* A staged */
+    wt_confirm_poll(w, "projA");
+    wt_confirm_poll(w, "projB");
     ASSERT_EQ(index_call_count, 1); /* only A changed */
 
     /* Cleanup */
@@ -2350,6 +2379,8 @@ TEST(watcher_interval_blocks_repoll) {
     /* Now touch to bypass interval */
     cbm_watcher_touch(w, "intv-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* #10: staged */
+    wt_confirm_poll(w, "intv-repo");
     ASSERT_EQ(index_call_count, 1); /* now detected */
 
     cbm_watcher_free(w);
@@ -2469,9 +2500,11 @@ TEST(watcher_continued_dirty) {
         th_append_file(_p, "dirty\n");
     }
 
-    /* First detection */
+    /* First detection — two rounds per #10 */
     cbm_watcher_touch(w, "cont-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "cont-repo");
     ASSERT_EQ(index_call_count, 1);
 
     /* Still dirty but UNCHANGED — must stay quiet (#937) */
@@ -2487,6 +2520,8 @@ TEST(watcher_continued_dirty) {
     }
     cbm_watcher_touch(w, "cont-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 1); /* staged */
+    wt_confirm_poll(w, "cont-repo");
     ASSERT_EQ(index_call_count, 2);
 
     /* Commit to clean up, then poll — should not trigger */
@@ -2549,9 +2584,12 @@ TEST(watcher_baseline_dirty_repo) {
     cbm_watcher_poll_once(w);
     ASSERT_EQ(index_call_count, 0); /* baseline never triggers */
 
-    /* First real poll — should detect the pre-existing dirty state */
+    /* First real poll — should detect the pre-existing dirty state
+     * (two rounds per #10) */
     cbm_watcher_touch(w, "bld-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "bld-repo");
     ASSERT_EQ(index_call_count, 1);
 
     cbm_watcher_free(w);
@@ -2652,9 +2690,11 @@ TEST(watcher_watch_after_unwatch) {
     cbm_watcher_poll_once(w);
     ASSERT_EQ(index_call_count, 0); /* baseline never triggers */
 
-    /* Second poll — detects dirty */
+    /* Second poll — stages the dirty change; third confirms it (#10) */
     cbm_watcher_touch(w, "rewatch-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0);
+    wt_confirm_poll(w, "rewatch-repo");
     ASSERT_EQ(index_call_count, 1);
 
     cbm_watcher_free(w);
@@ -2710,9 +2750,11 @@ TEST(watcher_detects_file_delete) {
         cbm_unlink(_p);
     }
 
-    /* Touch + poll → should detect deletion */
+    /* Touch + poll → should detect deletion (two rounds per #10) */
     cbm_watcher_touch(w, "del-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "del-repo");
     ASSERT_EQ(index_call_count, 1);
 
     cbm_watcher_free(w);
@@ -2756,9 +2798,11 @@ TEST(watcher_detects_subdir_file) {
         th_write_file(_p, "package pkg\n");
     }
 
-    /* Touch + poll → should detect untracked file in subdir */
+    /* Touch + poll → should detect untracked file in subdir (two rounds) */
     cbm_watcher_touch(w, "sub-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "sub-repo");
     ASSERT_EQ(index_call_count, 1);
 
     cbm_watcher_free(w);
@@ -2832,9 +2876,11 @@ TEST(watcher_full_flow_new_file) {
         th_write_file(_p, "package main\n");
     }
 
-    /* Touch to bypass interval, then poll — should detect */
+    /* Touch to bypass interval, then poll — should detect (two rounds #10) */
     cbm_watcher_touch(w, "ffnf-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "ffnf-repo");
     ASSERT_EQ(index_call_count, 1);
 
     cbm_watcher_free(w);
@@ -2894,9 +2940,11 @@ TEST(watcher_fallback_still_detects) {
         th_write_file(_p, "package main\n");
     }
 
-    /* Detect change with fresh git strategy */
+    /* Detect change with fresh git strategy (two rounds per #10) */
     cbm_watcher_touch(w, "fb-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "fb-repo");
     ASSERT_EQ(index_call_count, 1);
 
     cbm_watcher_free(w);
@@ -2965,9 +3013,11 @@ TEST(watcher_poll_only_watched_projects) {
         th_append_file(_p, "dirty\n");
     }
 
-    /* Poll — only A should trigger (B is not watched) */
+    /* Poll — only A should trigger (B is not watched; two rounds per #10) */
     cbm_watcher_touch(w, "projA-ow");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "projA-ow");
     ASSERT_EQ(index_call_count, 1);
 
     cbm_watcher_free(w);
@@ -3017,9 +3067,11 @@ TEST(watcher_touch_resets_immediate) {
     cbm_watcher_poll_once(w);
     ASSERT_EQ(index_call_count, 0); /* blocked */
 
-    /* With touch: poll proceeds */
+    /* With touch: poll proceeds (two rounds per #10) */
     cbm_watcher_touch(w, "tch-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "tch-repo");
     ASSERT_EQ(index_call_count, 1); /* detected */
 
     cbm_watcher_free(w);
@@ -3070,9 +3122,11 @@ TEST(watcher_modify_tracked_file) {
         th_write_file(_p, "package main\n\nfunc main() {}\n");
     }
 
-    /* Touch + poll → should detect modification */
+    /* Touch + poll → should detect modification (two rounds per #10) */
     cbm_watcher_touch(w, "mod-repo");
     cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* staged */
+    wt_confirm_poll(w, "mod-repo");
     ASSERT_EQ(index_call_count, 1);
 
     cbm_watcher_free(w);
@@ -3361,6 +3415,8 @@ TEST(watcher_callback_data_passed) {
 
     cbm_watcher_touch(w, "cbdata-repo");
     cbm_watcher_poll_once(w);
+    /* #10: the dirty change needs a confirming round before the callback. */
+    wt_confirm_poll(w, "cbdata-repo");
 
     /* If callback was invoked, g_cbdata_received should point to g_cbdata_value */
     if (g_cbdata_received) {
@@ -3505,6 +3561,11 @@ TEST(watcher_unwatch_invalidates_remaining_poll_snapshot) {
     th_append_file(wt_path(path, sizeof(path), second, "file.txt"), "dirty\n");
     cbm_watcher_touch(w, ctx.first_project);
     cbm_watcher_touch(w, ctx.second_project);
+    /* #10: the first dirty poll only stages; the second admits the callback
+     * (which unwatches both projects from inside the poll snapshot). */
+    (void)cbm_watcher_poll_once(w);
+    cbm_watcher_touch(w, ctx.first_project);
+    cbm_watcher_touch(w, ctx.second_project);
     int reindexed = cbm_watcher_poll_once(w);
     int watches_after_callback = cbm_watcher_watch_count(w);
     (void)cbm_watcher_poll_once(w); /* drain the two deferred states */
@@ -3572,7 +3633,9 @@ TEST(watcher_replace_during_poll_defers_old_state_free) {
         th_append_file(wt_path(p, sizeof(p), original, "file.txt"), "dirty\n");
     }
     cbm_watcher_touch(w, "replace-repo");
-    ASSERT_EQ(cbm_watcher_poll_once(w), 1);
+    ASSERT_EQ(cbm_watcher_poll_once(w), 0); /* #10: staged */
+    ASSERT_EQ(ctx.calls, 0);
+    ASSERT_EQ(wt_confirm_poll(w, "replace-repo"), 1);
     ASSERT_EQ(ctx.calls, 1);
     ASSERT_EQ(cbm_watcher_watch_count(w), 1);
 
@@ -3600,10 +3663,263 @@ TEST(watcher_null_watch_count) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ *  POLL DECISION (#10) — pure state machine
+ * ══════════════════════════════════════════════════════════════════ */
+
+static cbm_watch_poll_output_t wt_decide(cbm_watch_poll_input_t in) {
+    cbm_watch_poll_output_t out;
+    cbm_watcher_decide_poll(&in, &out);
+    return out;
+}
+
+TEST(watch_decide_first_dirty_round_stages_without_index) {
+    cbm_watch_poll_input_t in = {.dirty_changed = true, .observed_sig = 7};
+    cbm_watch_poll_output_t out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_WAIT);
+    ASSERT_TRUE(out.pending_valid);
+    ASSERT_EQ(out.pending_sig, 7);
+    ASSERT_TRUE(out.pending_refreshed);
+    PASS();
+}
+
+TEST(watch_decide_second_equal_round_triggers) {
+    cbm_watch_poll_input_t in = {.dirty_changed = true,
+                                 .observed_sig = 7,
+                                 .pending_valid = true,
+                                 .pending_sig = 7};
+    cbm_watch_poll_output_t out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_INDEX);
+    /* The staged state is left alone on an INDEX decision: a busy-skip or
+     * failed run retries on the next poll without re-staging (#937). */
+    ASSERT_TRUE(out.pending_valid);
+    ASSERT_FALSE(out.pending_refreshed);
+    PASS();
+}
+
+TEST(watch_decide_mid_confirmation_change_restarts_window) {
+    /* Round 1 stages sig 7; round 2 observes sig 9 (still churning) → the
+     * window restarts on 9, no index. Round 3 confirms 9 → index. */
+    cbm_watch_poll_input_t in = {.dirty_changed = true,
+                                 .observed_sig = 9,
+                                 .pending_valid = true,
+                                 .pending_sig = 7};
+    cbm_watch_poll_output_t out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_WAIT);
+    ASSERT_EQ(out.pending_sig, 9);
+    ASSERT_TRUE(out.pending_refreshed);
+
+    in.pending_sig = out.pending_sig;
+    in.observed_sig = 9;
+    out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_INDEX);
+    PASS();
+}
+
+TEST(watch_decide_revert_to_baseline_clears_pending) {
+    /* A pending change whose tree returns to the committed baseline needs no
+     * index; the stale window must be discarded, not fired later. */
+    cbm_watch_poll_input_t in = {.pending_valid = true, .pending_sig = 7};
+    cbm_watch_poll_output_t out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_IDLE);
+    ASSERT_FALSE(out.pending_valid);
+    PASS();
+}
+
+TEST(watch_decide_cooldown_holds_stable_and_refreshes_pending) {
+    /* A cooldown holds EVEN a stable (already-confirmed) signature — the
+     * next confirmed round after expiry is what fires. */
+    cbm_watch_poll_input_t in = {.dirty_changed = true,
+                                 .in_cooldown = true,
+                                 .observed_sig = 7,
+                                 .pending_valid = true,
+                                 .pending_sig = 7};
+    cbm_watch_poll_output_t out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_WAIT);
+    ASSERT_FALSE(out.pending_refreshed);
+
+    /* A NEW dirty state during cooldown restages but still does not fire. */
+    in.observed_sig = 9;
+    out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_WAIT);
+    ASSERT_EQ(out.pending_sig, 9);
+    ASSERT_TRUE(out.pending_refreshed);
+    PASS();
+}
+
+TEST(watch_decide_head_move_triggers_in_single_round) {
+    /* Commits are explicit actions: one round, no confirmation, no pending. */
+    cbm_watch_poll_input_t in = {.head_moved = true};
+    cbm_watch_poll_output_t out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_INDEX);
+
+    /* A commit on top of a dirty change fires immediately too. */
+    in.dirty_changed = true;
+    in.observed_sig = 7;
+    out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_INDEX);
+    PASS();
+}
+
+TEST(watch_decide_head_move_still_held_by_cooldown) {
+    /* The cooldown out-ranks the HEAD exception: the move stays uncommitted
+     * (baselines commit only on success) and fires once the cooldown ends. */
+    cbm_watch_poll_input_t in = {.head_moved = true,
+                                 .in_cooldown = true,
+                                 .dirty_changed = true,
+                                 .observed_sig = 7};
+    cbm_watch_poll_output_t out = wt_decide(in);
+    ASSERT_EQ(out.decision, CBM_WATCH_DECISION_WAIT);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  COOLDOWN + FRESHNESS (#10) — integration
+ * ══════════════════════════════════════════════════════════════════ */
+
+TEST(watcher_cooldown_blocks_then_env_disables) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_watcher_cdl_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    if (wt_git(tmpdir, "init -q") != 0) {
+        th_rmtree(tmpdir);
+        FAIL("git init failed");
+    }
+    {
+        char p[300];
+        th_write_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "hello\n");
+    }
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m init");
+
+    /* A long cooldown: the window outlives the test unless the env disables
+     * it live (the env is re-read on every use, like PRUNE_GRACE). */
+    cbm_setenv("CBM_WATCH_COOLDOWN_S", "3600", 1);
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+    cbm_watcher_watch(w, "cdl-repo", tmpdir);
+    index_call_count = 0;
+
+    cbm_watcher_poll_once(w); /* baseline */
+
+    /* Dirty → confirm → index #1, which opens the cooldown. */
+    {
+        char p[300];
+        th_append_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "dirty\n");
+    }
+    cbm_watcher_touch(w, "cdl-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 0); /* first round only stages */
+    wt_confirm_poll(w, "cdl-repo");
+    ASSERT_EQ(index_call_count, 1);
+
+    /* A further change inside the cooldown restages but never fires. */
+    {
+        char p[300];
+        th_append_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "more\n");
+    }
+    ASSERT_EQ(wt_confirm_poll(w, "cdl-repo"), 0);
+    ASSERT_EQ(index_call_count, 1);
+    ASSERT_EQ(wt_confirm_poll(w, "cdl-repo"), 0);
+    ASSERT_EQ(index_call_count, 1);
+
+    /* The env is a live switch: disabling it lets the held change through on
+     * the next confirmed round (at-least-once is never sacrificed). */
+    cbm_setenv("CBM_WATCH_COOLDOWN_S", "0", 1);
+    ASSERT_EQ(wt_confirm_poll(w, "cdl-repo"), 1);
+    ASSERT_EQ(index_call_count, 2);
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
+TEST(watcher_freshness_tracks_index_and_pending) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_watcher_frsh_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    if (wt_git(tmpdir, "init -q") != 0) {
+        th_rmtree(tmpdir);
+        FAIL("git init failed");
+    }
+    {
+        char p[300];
+        th_write_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "hello\n");
+    }
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m init");
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+    cbm_watcher_freshness_t fr;
+
+    /* No watch / no observation → the accessor reports NO SIGNAL, which is
+     * what index_status omits the block for. */
+    ASSERT_FALSE(cbm_watcher_get_freshness(w, "fresh-repo", &fr));
+
+    cbm_watcher_watch(w, "fresh-repo", tmpdir);
+    index_call_count = 0;
+
+    cbm_watcher_poll_once(w); /* baseline: watched but nothing observed yet */
+    ASSERT_FALSE(cbm_watcher_get_freshness(w, "fresh-repo", &fr));
+
+    cbm_watcher_touch(w, "fresh-repo");
+    cbm_watcher_poll_once(w); /* first clean observation */
+    ASSERT_TRUE(cbm_watcher_get_freshness(w, "fresh-repo", &fr));
+    ASSERT_TRUE(fr.valid);
+    ASSERT_EQ(fr.observed_sig, 0); /* clean tree */
+    ASSERT_EQ(fr.indexed_sig, 0);
+    ASSERT_FALSE(fr.pending);
+    ASSERT_EQ(fr.last_index_success_ms, 0); /* the watcher has not indexed */
+
+    /* Dirty → staged: pending, stale, not yet indexed. */
+    {
+        char p[300];
+        th_append_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "dirty\n");
+    }
+    cbm_watcher_touch(w, "fresh-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_TRUE(cbm_watcher_get_freshness(w, "fresh-repo", &fr));
+    ASSERT_TRUE(fr.pending);
+    ASSERT_NEQ(fr.observed_sig, 0);
+    ASSERT_EQ(fr.indexed_sig, 0);
+    ASSERT_GT(fr.pending_since_ms, 0);
+    int64_t pending_since = fr.pending_since_ms;
+
+    /* Confirmed round + successful index: the staged signature commits as
+     * the indexed one and the pending window closes. */
+    wt_confirm_poll(w, "fresh-repo");
+    ASSERT_EQ(index_call_count, 1);
+    ASSERT_TRUE(cbm_watcher_get_freshness(w, "fresh-repo", &fr));
+    ASSERT_FALSE(fr.pending);
+    ASSERT_EQ(fr.pending_since_ms, 0);
+    ASSERT_EQ(fr.indexed_sig, fr.observed_sig);
+    ASSERT_GT(fr.last_index_success_ms, 0);
+    ASSERT_GT(fr.last_index_success_ms, pending_since);
+
+    cbm_watcher_unwatch(w, "fresh-repo");
+    ASSERT_FALSE(cbm_watcher_get_freshness(w, "fresh-repo", &fr));
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
 
 SUITE(watcher) {
+    /* #10: the default 30s post-success cooldown would force every test that
+     * triggers a second index to wait in real time. Disable it suite-wide;
+     * the dedicated cooldown test re-enables it and restores "0" on exit. */
+    cbm_setenv("CBM_WATCH_COOLDOWN_S", "0", 1);
     /* Adaptive interval */
     RUN_TEST(poll_interval_base);
     RUN_TEST(poll_interval_scaling);
@@ -3656,6 +3972,17 @@ SUITE(watcher) {
     RUN_TEST(watcher_dirty_state_reindexes_once_issue937);
     RUN_TEST(watcher_failed_reindex_retries_issue937);
     RUN_TEST(watcher_multiple_projects);
+
+    /* Poll decision (#10): two-round confirmation, cooldown, HEAD exception */
+    RUN_TEST(watch_decide_first_dirty_round_stages_without_index);
+    RUN_TEST(watch_decide_second_equal_round_triggers);
+    RUN_TEST(watch_decide_mid_confirmation_change_restarts_window);
+    RUN_TEST(watch_decide_revert_to_baseline_clears_pending);
+    RUN_TEST(watch_decide_cooldown_holds_stable_and_refreshes_pending);
+    RUN_TEST(watch_decide_head_move_triggers_in_single_round);
+    RUN_TEST(watch_decide_head_move_still_held_by_cooldown);
+    RUN_TEST(watcher_cooldown_blocks_then_env_disables);
+    RUN_TEST(watcher_freshness_tracks_index_and_pending);
 
     /* Non-git project */
     RUN_TEST(watcher_non_git_skips);

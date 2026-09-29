@@ -161,6 +161,38 @@ and preserves any previously serving database. See
 [Index resource limits](INDEX_RESOURCE_LIMITS.md) for counting, validation, and
 error-response details.
 
+### Watcher trigger economics (fork issue #10)
+
+The watcher never reindexes on the first sighting of a dirty worktree. A
+dirty-state change is indexed only when the NEXT poll observes the same
+whole-tree signature again — an editor writing a burst of files produces
+several distinct signatures in a row, and each watcher-triggered delta costs
+close to a full incremental index (upstream #867), so the burst is paid for
+once, after it settles. **This trades latency for stability: a dirty change
+reaches the index one poll cycle late (5–60s depending on project size).**
+
+Two exceptions and one cap, all per project:
+
+- **Commits trigger immediately.** HEAD movement (commit/checkout/pull) is an
+  explicit action and indexes in a single round.
+- **Cooldown after every successful index.** Further triggers are held and
+  only restaged — commits included; the baseline stays uncommitted, so the
+  change is never lost, it fires once the cooldown ends. Default 30 seconds;
+  `CBM_WATCH_COOLDOWN_S` overrides it (re-read on every use, `0` disables).
+- **Freshness is visible.** `index_status` reports a `freshness` block
+  (`indexed_at`, `workspace_dirty`, `index_pending`, `stale`) per watched
+  project. Anchors are aggregate-scope only — the project row's generation
+  timestamp and the watcher's whole-tree signature; never per-file mtime
+  (upstream #1714) and never `Branch.head_sha` (upstream #1213). The block is
+  omitted when there is no watcher signal (watcher disabled, `auto_watch=off`
+  for the session's project, non-git root): absent means "no data", not
+  "fresh".
+
+The pre-existing stale-root prune window is also env-tunable:
+`CBM_WATCHER_PRUNE_GRACE_S` (seconds a missing root must stay missing before
+its cached DB is pruned; default 600, `0` prunes as soon as the missing-poll
+streak is reached).
+
 ## 3. UI Settings
 
 The optional built-in graph UI stores its settings in:

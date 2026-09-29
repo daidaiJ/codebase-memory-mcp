@@ -291,6 +291,64 @@ absent from the probe's known set — a chain THROUGH a test file can report
 `limited` and mint a cursor whose pull yields no new visible rows. The chain
 still terminates at the depth ceiling; the totals and watermark stay honest.
 
+## 9. Watcher thundering-herd guard + freshness (fork issue #10)
+
+Watcher-triggered deltas cost close to a full incremental index (upstream
+#867), so "react to the first sighting" was the wrong price model. Three
+changes, all per project, no new config keys (constants + env, matching the
+watcher's existing style):
+
+1. **Two-round confirmation.** A dirty-state change is indexed only when the
+   next poll observes the SAME whole-tree signature again; a different
+   signature mid-confirmation restarts the window; a tree returning to the
+   committed baseline discards it. The decision is a pure exported function
+   (`cbm_watcher_decide_poll`) so the state machine is unit-tested directly.
+   **Priced honestly: a dirty change reaches the index one poll cycle late
+   (5–60s).**
+2. **Post-success cooldown.** A successful index opens a per-project window
+   (default 30s, `CBM_WATCH_COOLDOWN_S`, read on every use — `0` disables
+   live, including deadlines an earlier setting created). During the window
+   NOTHING triggers — HEAD moves included; baselines stay uncommitted so the
+   change fires once the window ends (at-least-once preserved, #937).
+3. **HEAD-move exception.** Commits are explicit actions: they index in a
+   single round, no confirmation.
+
+**Freshness exposure** (absorbs backlog B3 in its downgraded form — query
+tools already carry the honesty fields from #6/#7, so this is index_status's
+job alone): `cbm_watcher_get_freshness` exposes per-project state and
+`index_status` renders it as
+
+```json
+"freshness": {"indexed_at": "...", "workspace_dirty": bool,
+              "index_pending": bool, "stale": bool}
+```
+
+Anchors are aggregate-scope only: `indexed_at` is the project row's generation
+timestamp, staleness compares the watcher's whole-tree signatures — never
+per-file mtime (upstream #1714) and never `Branch.head_sha` (upstream #1213).
+The block is OMITTED when there is no signal (no watcher, `auto_watch=off`
+→ project unwatched, non-git root, no completed observation): absent means
+"no data", never "fresh".
+
+- `src/watcher/watcher.h` — decision enum + pure `cbm_watcher_decide_poll`,
+  `cbm_watcher_freshness_t` + `cbm_watcher_get_freshness`.
+- `src/watcher/watcher.c` — `confirm_*`/`pending_since_ms`/`cooldown_until_ms`/
+  `last_index_success_ms`/`observed_once` per-project state; `watch_cooldown_s`
+  env reader; `check_changes` reduced to observation (decision moved out);
+  `poll_project` applies the decision and starts the cooldown on success.
+- `src/mcp/mcp.c` — `handle_index_status` freshness block.
+- Tests: `tests/test_watcher.c` — the seven `watch_decide_*` pure-matrix tests
+  (two equal rounds trigger; mid-window change restarts; revert-to-baseline
+  clears; cooldown holds even a stable signature and restages new ones; HEAD
+  triggers in one round; cooldown out-ranks the HEAD exception), the
+  cooldown integration test (`CBM_WATCH_COOLDOWN_S` blocks then disables
+  live), the freshness accessor test, and every dirty-path flow test rewritten
+  to the two-round contract. `tests/test_mcp.c` —
+  `tool_index_status_freshness_fresh_pending_reindexed_and_absent` (fresh /
+  pending / re-indexed / unwatched-absent matrix). The suite disables the
+  cooldown suite-wide (`CBM_WATCH_COOLDOWN_S=0`); only the dedicated cooldown
+  test re-enables it.
+
 ## Verification notes
 
 - `tests/test_mem.c` updated to the capped-default semantics (incl. new
@@ -309,6 +367,11 @@ still terminates at the depth ceiling; the totals and watermark stay honest.
     `include_evidence=true` keeps the summary once and consistent.
   - #7 — `tool_detect_changes_honesty_note_in_both_formats`: both fields in
     both formats on the zero-impacted case.
+  - #10 — the `watch_decide_*` pure-decision matrix, cooldown integration
+    (env blocks then disables live), watcher freshness accessor states, and
+    `tool_index_status_freshness_fresh_pending_reindexed_and_absent`.
+    Phase-2 caveat: dirty-path flow tests now need TWO polls (stage + confirm)
+    — any future upstream rebase must not "simplify" them back to one.
   - Full-suite note: `make -f Makefile.cbm test` on a maintainer machine is
     the acceptance gate (fork CI builds only); see docs/BUILD_WINDOWS.md for
     the Windows recipe.
