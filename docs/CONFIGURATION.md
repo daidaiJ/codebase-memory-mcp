@@ -100,7 +100,7 @@ Current keys:
 | Profile | Tools |
 |---|---|
 | `all` | The full registry. |
-| `minimal` *(fork default)* | `get_architecture`, `query_graph`, `detect_changes` only — the three tools that survive side-by-side comparison with a grep + symbol-tool baseline (architecture overview, whole-repo complexity ranking, diff-driven impact radius). Everything else duplicates what local tools already do, with a cold-start penalty. |
+| `minimal` *(fork default)* | `search_graph`, `query_graph`, `get_architecture` only — symbol-level exact discovery, whole-repo complexity ranking, and architecture overview: the tools with no grep/codegraph equivalent (fork issue #5 swapped `search_graph` in for `detect_changes`, the surface's least trustworthy tool, which stays on analysis/all). Everything else duplicates what local tools already do, with a cold-start penalty. |
 | `analysis` | Read-only inspection subset. |
 | `scout` | Fast positive-discovery subset. |
 

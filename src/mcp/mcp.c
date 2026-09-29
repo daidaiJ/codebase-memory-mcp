@@ -851,15 +851,19 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
         "search_graph",     "trace_path",    "get_code_snippet", "get_file_outline",
         "get_architecture", "list_projects", "index_status",     "check_index_coverage",
     };
-    /* Fork patch (fork issue #4): the default agent surface. Only the three
-     * tools that beat the grep/codegraph baseline in side-by-side trials —
-     * architecture overview, whole-repo complexity ranking, diff-driven blast
-     * radius — survive. Everything else duplicates what the agent's existing
-     * grep/symbol tools already do, with a cold-start penalty they don't pay. */
+    /* Fork patch (fork issue #4, reshuffled by fork issue #5): the default
+     * agent surface. Symbol-level exact discovery (search_graph) replaced
+     * detect_changes after the 2026-09 trust repair: search_graph is the
+     * second-most-used tool upstream (~210 issue mentions) and does not
+     * duplicate the agent's grep/symbol tools; detect_changes is the least
+     * trustworthy tool on the surface (upstream #2128 "dead verdict" family)
+     * and stays on analysis/all only until its credibility is repaired.
+     * get_architecture and query_graph keep their #4 rationale (no
+     * grep/codegraph equivalent). */
     static const char *const minimal_tools[] = {
-        "get_architecture",
+        "search_graph",
         "query_graph",
-        "detect_changes",
+        "get_architecture",
     };
     if (!name) {
         return false;
@@ -1322,11 +1326,12 @@ static const char MCP_SCOUT_SERVER_INSTRUCTIONS[] =
 
 static const char MCP_MINIMAL_SERVER_INSTRUCTIONS[] =
     "This is the minimal tool profile (fork patch): only the three graph tools that beat a "
-    "grep/symbol-tool baseline are available. get_architecture for orientation, fan-in hotspots, "
-    "layering, and module clustering; query_graph for whole-repo complexity ranking and "
-    "multi-hop structural patterns; detect_changes for diff-driven impact radius. For literal "
-    "text search, single-symbol lookup, call-chain tracing, or exact source, prefer your local "
-    "grep and symbol tools — they are faster and see non-symbol content. If the project is "
+    "grep/symbol-tool baseline are available. search_graph for symbol-level exact discovery "
+    "(exact and fuzzy match over qualified names; the second-most-used tool upstream), "
+    "query_graph for whole-repo complexity ranking and multi-hop structural patterns, "
+    "get_architecture for orientation, fan-in hotspots, layering, and module clustering. For "
+    "literal text search, single-symbol lookup, call-chain tracing, or exact source, prefer your "
+    "local grep and symbol tools — they are faster and see non-symbol content. If the project is "
     "missing or stale, refresh it out-of-band (cbm cli index_repository) instead of calling "
     "indexing tools that are not in this surface. Check has_more or nextCursor and paginate "
     "when present.";

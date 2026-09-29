@@ -1154,8 +1154,8 @@ static void print_help(void) {
     printf("  --ui=false   Disable HTTP graph visualization (persisted)\n");
     printf("  --port=N     Set UI port (default 9749, persisted)\n");
     printf("  --tool-profile=all|minimal|analysis|scout\n");
-    printf("               Tool surface; fork default 'minimal' (get_architecture,\n");
-    printf("               query_graph, detect_changes only)\n");
+    printf("               Tool surface; fork default 'minimal' (search_graph,\n");
+    printf("               query_graph, get_architecture only)\n");
     printf("\nSupported automatic/conditional client surfaces (45):\n");
     printf("  Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode,\n");
     printf("  Antigravity, Aider, KiloCode, VS Code, Cursor, Windsurf,\n");

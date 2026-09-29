@@ -11,13 +11,19 @@ Patches target `feat/minimal-tool-surface`; rebase onto upstream `main` per
 release and re-verify the touched call sites (file:line references below are
 from the patch branch).
 
-## 1. MCP default tool surface: minimal (fork issue #4)
+## 1. MCP default tool surface: minimal (fork issue #4; reshuffled by fork issue #5)
 
-The MCP server advertises three tools by default — `get_architecture`,
-`query_graph`, `detect_changes` — the ones with no grep/codegraph equivalent
-(architecture overview with fan-in hotspots and layering, whole-repo cognitive
-complexity ranking, diff-driven impact radius). `--tool-profile=all` restores
-the full registry; `analysis` / `scout` presets still work.
+The MCP server advertises three tools by default — `search_graph`,
+`query_graph`, `get_architecture`. Issue #4's original cut kept
+`detect_changes` (diff-driven impact radius) in place of `search_graph`; the
+2026-09 trust repair (fork issue #5) swapped them: `search_graph` is
+symbol-level exact discovery and the second-most-used tool upstream (~210
+issue mentions), while `detect_changes` is the least trustworthy tool on the
+surface (upstream #2128 "dead verdict" family — see §"detect_changes honesty
+note") and stays on analysis/all only until its credibility is repaired.
+`get_architecture` / `query_graph` keep their #4 rationale: no
+grep/codegraph equivalent. `--tool-profile=all` restores the full registry;
+`analysis` / `scout` presets still work.
 
 - `src/mcp/mcp.h` — `CBM_MCP_TOOL_PROFILE_MINIMAL` (wire value 3); parse doc.
 - `src/mcp/mcp.c` — `minimal_tools[]` allowlist; profile name/parse (accepts
@@ -26,7 +32,8 @@ the full registry; `analysis` / `scout` presets still work.
 - `src/main.c` — MCP client role default MINIMAL; usage text.
 - `src/daemon/application.c` — context-header bound checks widened to MINIMAL
   (client `set_context` + daemon validation must agree, else sessions are
-  rejected).
+  rejected). Wire values and the profile enum were NOT touched by #5 — only
+  the membership table changed.
 
 Deliberately unchanged: daemon-internal sessions default to ALL, so one-shot
 CLI calls and hooks keep the full registry — the CLI is not the constrained

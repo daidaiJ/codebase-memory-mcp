@@ -119,10 +119,10 @@ typedef enum {
      * write, so these are intentionally not named strictly read-only modes. */
     CBM_MCP_TOOL_PROFILE_ANALYSIS = 1,
     CBM_MCP_TOOL_PROFILE_SCOUT = 2,
-    /* Fork patch (fork issue #4): the default agent surface. Only the three
-     * tools that beat the grep/codegraph baseline in side-by-side trials are
-     * advertised: get_architecture, query_graph, detect_changes. Pass
-     * --tool-profile=all to restore the full surface explicitly. */
+    /* Fork patch (fork issue #4, reshuffled by fork issue #5): the default
+     * agent surface. The three advertised tools are search_graph,
+     * query_graph, get_architecture. Pass --tool-profile=all to restore the
+     * full surface explicitly. */
     CBM_MCP_TOOL_PROFILE_MINIMAL = 3,
 } cbm_mcp_tool_profile_t;
 

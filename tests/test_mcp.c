@@ -1910,7 +1910,13 @@ TEST(server_handle_tools_list) {
     PASS();
 }
 
-TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
+/* Fork patch (fork issue #5): the default (MINIMAL) tools/list must advertise
+ * EXACTLY the reshuffled minimal surface — search_graph / query_graph /
+ * get_architecture — and never the tools the surface was curated against
+ * (detect_changes) or the maintenance tools that only --tool-profile=all
+ * exposes. Count is pinned so a future registration cannot silently widen
+ * the default surface again. */
+TEST(server_handle_tools_list_defaults_to_minimal_surface_and_accepts_cursor) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
     char *resp =
@@ -1918,9 +1924,14 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":200"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
-    ASSERT_NOT_NULL(strstr(resp, "index_repository"));
-    ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
-    ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
+    ASSERT_NOT_NULL(strstr(resp, "search_graph"));
+    ASSERT_NOT_NULL(strstr(resp, "query_graph"));
+    ASSERT_NOT_NULL(strstr(resp, "get_architecture"));
+    ASSERT_NULL(strstr(resp, "detect_changes"));
+    ASSERT_NULL(strstr(resp, "index_repository"));
+    ASSERT_NULL(strstr(resp, "manage_adr"));
+    ASSERT_NULL(strstr(resp, "ingest_traces"));
+    ASSERT_EQ(mcp_response_tool_count(resp), 3U);
     free(resp);
 
     resp = cbm_mcp_server_handle(
@@ -1928,8 +1939,8 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":202"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
-    ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
-    ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
+    ASSERT_NOT_NULL(strstr(resp, "search_graph"));
+    ASSERT_NULL(strstr(resp, "detect_changes"));
     free(resp);
 
     /* A cursored page advertises nextCursor exactly while tools remain after
@@ -1942,7 +1953,7 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NOT_NULL(resp);
     size_t total_tools = mcp_response_tool_count(resp);
     free(resp);
-    ASSERT_TRUE(total_tools > 1U);
+    ASSERT_EQ(total_tools, 3U);
 
     char last_page_req[160];
     snprintf(last_page_req, sizeof(last_page_req),
@@ -2066,6 +2077,13 @@ TEST(analysis_profile_arguments_fail_closed_and_disable_http) {
     const char *missing_value[] = {"codebase-memory-mcp", "--tool-profile"};
 
     ASSERT_EQ(cbm_mcp_parse_tool_profile_args(1, no_profile, &profile), 0);
+    /* Fork patch (fork issue #4, asserted per fork issue #5): absence of the
+     * flag selects the minimal surface, not the legacy full one. */
+    ASSERT_EQ(profile, CBM_MCP_TOOL_PROFILE_MINIMAL);
+    ASSERT_FALSE(cbm_mcp_tool_profile_allows_http(profile));
+
+    const char *all_equals[] = {"codebase-memory-mcp", "--tool-profile=all"};
+    ASSERT_EQ(cbm_mcp_parse_tool_profile_args(2, all_equals, &profile), 0);
     ASSERT_EQ(profile, CBM_MCP_TOOL_PROFILE_ALL);
     ASSERT_TRUE(cbm_mcp_tool_profile_allows_http(profile));
 
