@@ -14200,6 +14200,92 @@ TEST(tool_detect_changes_preserves_utf8_git_path_and_impact_seed) {
     PASS();
 }
 
+/* Honesty note (fork issue #7): detect_changes walks the CALLS heuristic
+ * graph, so "0 impacted" must never present itself as "no impact" — both
+ * emitters carry the same static graph_support + resolution_caveat at the
+ * response root. Fixture drives the genuinely misleading case: a changed
+ * file with zero seeded symbols (impacted_total 0). */
+TEST(tool_detect_changes_honesty_note_in_both_formats) {
+    char repo[CBM_SZ_4K];
+    snprintf(repo, sizeof(repo), "%s/cbm-detect-honesty-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    char cache[CBM_SZ_4K];
+    snprintf(cache, sizeof(cache), "%s/cbm-detect-honesty-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+
+    char source_path[CBM_SZ_4K];
+    snprintf(source_path, sizeof(source_path), "%s/plain.c", repo);
+    ASSERT_EQ(th_write_file(source_path, "int plain_value = 1;\n"), 0);
+
+    const char *const init_args[] = {"init", "-q", NULL};
+    const char *const add_args[] = {"add", "-A", NULL};
+    const char *const commit_args[] = {
+        "-c",     "user.name=cbm-test",
+        "-c",     "user.email=cbm-test@example.invalid",
+        "-c",     "commit.gpgsign=false",
+        "commit", "-q",
+        "-m",     "fixture",
+        NULL,
+    };
+    ASSERT_EQ(mcp_test_git(repo, init_args), 0);
+    ASSERT_EQ(mcp_test_git(repo, add_args), 0);
+    ASSERT_EQ(mcp_test_git(repo, commit_args), 0);
+    ASSERT_EQ(th_write_file(source_path, "int plain_value = 2;\n"), 0);
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    const char *project = "detect-honesty-project";
+    ASSERT_EQ(cbm_store_upsert_project(store, project, repo), CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, project);
+
+    /* json format: fields present as structured strings. */
+    char *response =
+        cbm_mcp_handle_tool(srv, "detect_changes",
+                            "{\"project\":\"detect-honesty-project\",\"base_branch\":\"HEAD\","
+                            "\"scope\":\"impact\",\"depth\":1,\"max_output_tokens\":10000,"
+                            "\"format\":\"json\"}");
+    char *inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    yyjson_doc *doc = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *support = yyjson_obj_get(root, "graph_support");
+    yyjson_val *caveat = yyjson_obj_get(root, "resolution_caveat");
+    ASSERT_NOT_NULL(support);
+    ASSERT_STR_EQ(yyjson_get_str(support), "heuristic-calls");
+    ASSERT_NOT_NULL(caveat);
+    ASSERT_NOT_NULL(strstr(yyjson_get_str(caveat), "0 impacted does not mean no impact"));
+    yyjson_val *impacted = yyjson_obj_get(root, "impacted");
+    ASSERT_TRUE(impacted && yyjson_is_arr(impacted) && yyjson_arr_size(impacted) == 0);
+    yyjson_doc_free(doc);
+    free(inner);
+    free(response);
+
+    /* Default tree format: the same constants, same values. */
+    response =
+        cbm_mcp_handle_tool(srv, "detect_changes",
+                            "{\"project\":\"detect-honesty-project\",\"base_branch\":\"HEAD\","
+                            "\"scope\":\"impact\",\"depth\":1,\"max_output_tokens\":10000}");
+    inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "graph_support: heuristic-calls"));
+    ASSERT_NOT_NULL(strstr(inner, "resolution_caveat: CALLS edges are resolution heuristics"));
+    free(inner);
+    free(response);
+
+    cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    ASSERT_EQ(th_rmtree(cache), 0);
+    ASSERT_EQ(th_rmtree(repo), 0);
+    PASS();
+}
+
 TEST(tool_detect_changes_finds_nested_untracked_file_and_impact_seed) {
     char repo[CBM_SZ_4K];
     snprintf(repo, sizeof(repo), "%s/cbm-detect-untracked-path-XXXXXX", cbm_tmpdir());
@@ -20868,6 +20954,7 @@ SUITE(mcp) {
     RUN_TEST(tool_detect_changes_not_found_rich_error);
     RUN_TEST(tool_detect_changes_invalid_base_is_an_error);
     RUN_TEST(tool_detect_changes_preserves_utf8_git_path_and_impact_seed);
+    RUN_TEST(tool_detect_changes_honesty_note_in_both_formats);
     RUN_TEST(tool_detect_changes_finds_nested_untracked_file_and_impact_seed);
     RUN_TEST(tool_detect_changes_escapes_newline_path_in_tree_and_round_trips_json);
     RUN_TEST(tool_detect_changes_staged_rename_uses_exact_destination_record);

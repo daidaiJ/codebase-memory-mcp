@@ -15961,6 +15961,19 @@ static bool detect_snapshot_fingerprint(cbm_mcp_server_t *srv, const char *root_
     return complete;
 }
 
+/* Static honesty note (fork issue #7): detect_changes maps a diff onto the
+ * CALLS graph, whose edges are resolution heuristics — framework/DI dispatch
+ * is invisible, so "0 impacted" must never read as "no impact". Unlike the
+ * trace_path caller_resolution summary (fork #6) this is a constant
+ * annotation, not a per-row statistic: impact walks cbm_store_bfs_multi,
+ * which returns no edges, so per-symbol evidence would need a store API
+ * extension — deliberately out of scope (spec: restraint). */
+#define DETECT_GRAPH_SUPPORT "heuristic-calls"
+#define DETECT_RESOLUTION_CAVEAT                                          \
+    "CALLS edges are resolution heuristics; 0 impacted does not mean no " \
+    "impact — framework/DI dispatch may be invisible. Cross-check with "  \
+    "trace_path(direction=..., include_evidence=true)"
+
 static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
     char *base_branch = cbm_mcp_get_string_arg(args, "base_branch");
@@ -16612,6 +16625,8 @@ render_detect_output:;
     if (!legacy_json) {
         cbm_sb_t sb;
         cbm_sb_init(&sb);
+        cbm_tree_scalar_str(&sb, "graph_support", DETECT_GRAPH_SUPPORT);
+        cbm_tree_scalar_str(&sb, "resolution_caveat", DETECT_RESOLUTION_CAVEAT);
         cbm_tree_scalar_str(&sb, "base", base_branch);
         if (merge_base[0]) {
             cbm_tree_scalar_str(&sb, "merge_base", merge_base);
@@ -16735,6 +16750,8 @@ render_detect_output:;
         yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
         yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
         yyjson_mut_doc_set_root(doc, root_obj);
+        yyjson_mut_obj_add_str(doc, root_obj, "graph_support", DETECT_GRAPH_SUPPORT);
+        yyjson_mut_obj_add_str(doc, root_obj, "resolution_caveat", DETECT_RESOLUTION_CAVEAT);
         yyjson_mut_obj_add_strcpy(doc, root_obj, "base", base_branch);
         if (merge_base[0]) {
             yyjson_mut_obj_add_strcpy(doc, root_obj, "merge_base", merge_base);

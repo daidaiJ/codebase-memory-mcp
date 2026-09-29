@@ -164,6 +164,39 @@ Known skew, by design: when the inbound edge collection saturates
 absent and their rows classify as unresolved — the response already flags the
 saturation loudly; the summary counts the evidence actually available.
 
+## 6. detect_changes honesty note (fork issue #7)
+
+detect_changes maps a git diff onto the CALLS graph, whose edges are
+resolution heuristics — framework/DI dispatch is invisible, so an empty
+impacted set reads as "no impact" to a trusting agent (the upstream #2128
+"dead verdict" family that got detect_changes demoted from the minimal face,
+§1). Both emitters now carry the same static annotation at the response root:
+
+- `graph_support: "heuristic-calls"` — names what the impact walk actually is.
+- `resolution_caveat` — fixed text: "CALLS edges are resolution heuristics;
+  0 impacted does not mean no impact — framework/DI dispatch may be invisible.
+  Cross-check with trace_path(direction=..., include_evidence=true)". The
+  cross-check now has something to find: trace_path carries the per-row
+  `caller_resolution` summary (§5).
+
+Deliberately a constant, not a statistic (downgraded from the backlog B2
+per-symbol evidence plan): impact traverses `cbm_store_bfs_multi`, which
+returns no edges, so per-symbol resolution evidence would need a store API
+extension — cost out of proportion for a single-user tool. The annotation is
+honest about the limit instead of faking precision.
+
+- `src/mcp/mcp.c` — `DETECT_GRAPH_SUPPORT` / `DETECT_RESOLUTION_CAVEAT`
+  shared constants; emitted at the root of the tree and legacy-json emitters
+  (the output-budget floor reuses the same emitters inline, so every path
+  carries the note).
+- `tests/test_mcp.c` — `tool_detect_changes_honesty_note_in_both_formats`:
+  fixture drives the misleading case (changed file, zero seeded symbols →
+  `impacted` empty) and pins both fields in both formats.
+- `AGENTS.md` known-pitfalls table updated: the "silent graph under-report"
+  row now points at the in-band defenses; the "invalid direction" row is
+  marked fixed (upstream commit `60390aff`, in the fork baseline, pinned by
+  the `invalid_rejected` assertion in test_mcp.c).
+
 ## Verification notes
 
 - `tests/test_mem.c` updated to the capped-default semantics (incl. new
