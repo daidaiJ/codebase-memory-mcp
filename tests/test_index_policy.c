@@ -273,6 +273,11 @@ TEST(index_policy_worker_rejects_missing_parent_policy) {
     char args[1024];
     (void)snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"fast\"}", repo);
     cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    /* index_repository lives on the legacy ALL surface (fork issue #4);
+     * this fixture exercises the worker policy, not the default tool face. */
+    if (server) {
+        cbm_mcp_server_set_tool_profile(server, CBM_MCP_TOOL_PROFILE_ALL);
+    }
 
     cbm_index_set_worker_role(true, NULL);
     char *response = server ? cbm_mcp_handle_tool(server, "index_repository", args) : NULL;
@@ -298,6 +303,11 @@ TEST(index_policy_mcp_rejects_forged_override_and_preserves_serving_index) {
     (void)cbm_setenv("CBM_CACHE_DIR", cache, 1);
     cbm_config_t *config = cbm_config_open(cache);
     cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    /* index_repository lives on the legacy ALL surface (fork issue #4);
+     * this fixture exercises policy enforcement, not the default tool face. */
+    if (server) {
+        cbm_mcp_server_set_tool_profile(server, CBM_MCP_TOOL_PROFILE_ALL);
+    }
     if (server && config) {
         cbm_mcp_server_set_config(server, config);
     }

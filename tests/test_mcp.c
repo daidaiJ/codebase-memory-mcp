@@ -84,6 +84,20 @@ static size_t mcp_response_tool_count(const char *response) {
     return count;
 }
 
+/* Fork issue #4 test debt: the fork's default tool surface is MINIMAL
+ * (search_graph / query_graph / get_architecture). Fixtures that exercise a
+ * specific tool opt into the legacy ALL surface so the suite covers tool
+ * behavior; the default-surface contract tests keep cbm_mcp_server_new(NULL)
+ * and assert the MINIMAL default directly. */
+static cbm_mcp_server_t *test_server_all_surface(void) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    if (srv) {
+        cbm_mcp_server_set_tool_profile(srv, CBM_MCP_TOOL_PROFILE_ALL);
+    }
+    return srv;
+}
+
+
 static char mcp_log_buf[4096];
 static bool mcp_saw_autoindex_log;
 
@@ -1845,7 +1859,7 @@ static int issue403_initialize_count_calls(const char *session_root, bool approv
         !approve_sensitive || cbm_workspace_grant_add(cache, cbm_workspace_home_dir(), session_root,
                                                       true, err, sizeof(err));
     cbm_config_t *cfg = approved ? cbm_config_open(cache) : NULL;
-    cbm_mcp_server_t *srv = cfg ? cbm_mcp_server_new(NULL) : NULL;
+    cbm_mcp_server_t *srv = cfg ? test_server_all_surface() : NULL;
     int calls = -2;
     if (srv) {
         cbm_config_set(cfg, CBM_CONFIG_AUTO_INDEX, "true");
@@ -1975,13 +1989,23 @@ TEST(server_handle_tools_list_defaults_to_minimal_surface_and_accepts_cursor) {
     free(resp);
 
     /* ...and a page that does have tools after it MUST advertise the cursor,
-     * so the assertion above cannot pass merely because paging never emits. */
-    resp = cbm_mcp_server_handle(
-        srv,
-        "{\"jsonrpc\":\"2.0\",\"id\":204,\"method\":\"tools/list\",\"params\":{\"cursor\":\"0\"}}");
-    ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "\"nextCursor\""));
-    free(resp);
+     * so the assertion above cannot pass merely because paging never emits.
+     * Paging only engages above MCP_TOOLS_PAGE_SIZE (8), which the pinned
+     * 3-tool MINIMAL surface can never reach, so this half of the contract is
+     * asserted against an ALL-surface server where the page actually splits. */
+    {
+        cbm_mcp_server_t *full = test_server_all_surface();
+        ASSERT_NOT_NULL(full);
+        resp = cbm_mcp_server_handle(
+            full,
+            "{\"jsonrpc\":\"2.0\",\"id\":204,\"method\":\"tools/list\","
+            "\"params\":{\"cursor\":\"0\"}}");
+        ASSERT_NOT_NULL(resp);
+        bool has_next_cursor = strstr(resp, "\"nextCursor\"") != NULL;
+        free(resp);
+        cbm_mcp_server_free(full);
+        ASSERT_TRUE(has_next_cursor);
+    }
 
     cbm_mcp_server_free(srv);
     PASS();
@@ -2080,7 +2104,9 @@ TEST(analysis_profile_arguments_fail_closed_and_disable_http) {
     const char *analysis_pair[] = {"codebase-memory-mcp", "--tool-profile", "analysis"};
     const char *scout_equals[] = {"codebase-memory-mcp", "--tool-profile=scout"};
     const char *unknown_equals[] = {"codebase-memory-mcp", "--tool-profile=analaysis"};
-    const char *unknown_pair[] = {"codebase-memory-mcp", "--tool-profile", "all"};
+    /* The parser accepts the separated two-argument form for known values
+     * (mcp.c pair branch), so "all" parses; only an UNKNOWN value fails. */
+    const char *unknown_pair[] = {"codebase-memory-mcp", "--tool-profile", "bogus"};
     const char *missing_value[] = {"codebase-memory-mcp", "--tool-profile"};
 
     ASSERT_EQ(cbm_mcp_parse_tool_profile_args(1, no_profile, &profile), 0);
@@ -2275,7 +2301,7 @@ TEST(server_handle_unknown_method) {
 
 /* Helper: create a server with an in-memory store populated with test data */
 static cbm_mcp_server_t *setup_mcp_with_data(void) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL); /* NULL = in-memory */
+    cbm_mcp_server_t *srv = test_server_all_surface(); /* NULL = in-memory */
     return srv;
 }
 
@@ -2656,7 +2682,7 @@ static yyjson_val *trace_grouped_row_named(yyjson_val *leg, const char *name,
  * set (field-eval agent read callers_total=175 against 2 visible rows and
  * distrusted the tool). */
 TEST(tool_trace_totals_respect_test_filter) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "totproj";
@@ -2727,7 +2753,7 @@ TEST(tool_trace_totals_respect_test_filter) {
  * relative one, so this row leaked into results with the default
  * include_tests=false (#1294, secondary bug). */
 TEST(tool_trace_totals_respect_test_filter_tests_root_subtree_issue1294) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "totproj2";
@@ -2914,7 +2940,7 @@ TEST(tool_get_code_snippet_clips_whole_file_node) {
     }
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "test-project";
@@ -2999,7 +3025,7 @@ TEST(tool_get_code_snippet_omits_over_budget_whole_line) {
     fputs(" */ }\n", fp);
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "snippet-wide";
@@ -3097,7 +3123,7 @@ TEST(tool_get_code_snippet_pages_outline_rows_to_exact_budget) {
     }
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "snippet-outline";
@@ -5374,7 +5400,7 @@ TEST(tool_list_projects_tree_uses_one_stable_header_and_keeps_json_direct) {
         cbm_store_close(store);
     }
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     char *identity_response = cbm_mcp_handle_tool(srv, "list_projects", "{\"limit\":50}");
     char *identity = extract_text_content(identity_response);
@@ -5487,7 +5513,7 @@ TEST(tool_list_projects_preserves_root_beyond_one_kib) {
     ASSERT_GT(cbm_store_upsert_node(store, &node), 0);
     cbm_store_close(store);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     char *tree_response = cbm_mcp_handle_tool(srv, "list_projects", "{\"limit\":50}");
     char *tree = extract_text_content(tree_response);
@@ -5548,7 +5574,7 @@ TEST(tool_index_status_no_project) {
  * presentation response. */
 TEST(tool_check_index_coverage_finds_path_beyond_status_cap) {
     enum { ROW_COUNT = 502 };
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -5604,7 +5630,7 @@ TEST(tool_check_index_coverage_finds_path_beyond_status_cap) {
 }
 
 TEST(tool_check_index_coverage_pages_exact_paths_and_restores_raw_diagnostics) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -5695,7 +5721,7 @@ TEST(tool_check_index_coverage_pages_exact_paths_and_restores_raw_diagnostics) {
  * second cap of its own, and that one must report itself the same way. */
 TEST(tool_check_index_coverage_reports_truncation_marker_issue963) {
     enum { WIDE_RANGE_COUNT = 300 };
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -6097,7 +6123,7 @@ TEST(tool_index_status_includes_git_metadata) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(tool_trace_call_path_not_found) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\","
@@ -6161,7 +6187,7 @@ TEST(tool_call_invalid_project_name_leaves_no_corrupt_litter_issue1425) {
 }
 
 TEST(tool_trace_missing_function_name) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\","
@@ -6178,7 +6204,7 @@ TEST(tool_trace_missing_function_name) {
 /* Regression: two same-named definitions with equal rank must be reported
  * ambiguous, not silently traced (trace_path previously took nodes[0]). */
 TEST(tool_trace_call_path_ambiguous) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "amb-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -6222,7 +6248,7 @@ TEST(tool_trace_call_path_ambiguous) {
  * (soon) pagination watermarks — it must be the MINIMUM across seeds, matching
  * the single-BFS MIN(hop) semantics (#797). */
 TEST(tool_trace_union_records_min_hop_across_seeds) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "dualproj";
     cbm_mcp_server_set_project(srv, proj);
@@ -6298,7 +6324,7 @@ TEST(tool_trace_union_records_min_hop_across_seeds) {
  * on every page, and a final page without a cursor. Stale and mismatched
  * cursors must fail with teaching errors, never silently restart. */
 TEST(tool_trace_pagination_exactly_once) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "pageproj";
     cbm_mcp_server_set_project(srv, proj);
@@ -6491,7 +6517,7 @@ TEST(tool_trace_pagination_exactly_once) {
 }
 
 TEST(tool_trace_paging_filters_before_window_and_hashes_effective_args) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "trace-visible-page";
@@ -6600,7 +6626,7 @@ TEST(tool_trace_paging_filters_before_window_and_hashes_effective_args) {
 }
 
 TEST(tool_trace_budget_never_slices_identifiers) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "trace-byte-budget";
@@ -6728,7 +6754,7 @@ TEST(tool_trace_budget_never_slices_identifiers) {
  * with more max_output_tokens must resume successfully instead of failing a
  * cursor-params hash check or replaying page one. */
 TEST(tool_trace_cursor_survives_output_budget_increase) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -6846,7 +6872,7 @@ TEST(tool_trace_cursor_survives_output_budget_increase) {
 }
 
 TEST(tool_trace_budget_drops_huge_optional_args_before_graph_row) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "trace-args-budget";
@@ -6945,7 +6971,7 @@ TEST(tool_trace_budget_drops_huge_optional_args_before_graph_row) {
 }
 
 TEST(tool_trace_reports_engine_saturation_as_lower_bound) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "trace-engine-cap";
@@ -7103,7 +7129,7 @@ TEST(store_bfs_edge_data_is_skippable_and_bounded) {
  * definition (callable, larger body) — NOT nodes[0]. The Module is inserted
  * first; if trace took nodes[0] the outbound trace would be empty. */
 TEST(tool_trace_call_path_prefers_definition) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "pref-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -7216,7 +7242,7 @@ TEST(trace_evidence_strategy_class_vocabulary_is_closed) {
  * A caller then cannot tell "the resolver was certain this is wrong" from
  * "nobody wrote a number here". */
 TEST(tool_trace_path_unreadable_confidence_reports_not_recorded) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "badconf-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -7280,7 +7306,7 @@ TEST(tool_trace_path_unreadable_confidence_reports_not_recorded) {
  * directions — no columns at all before, and "lsp_trait_dispatch" would leak
  * verbatim if the classifier were bypassed. */
 TEST(tool_trace_path_evidence_is_opt_in_and_class_mapped) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "ev-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -7388,7 +7414,7 @@ TEST(tool_trace_path_evidence_is_opt_in_and_class_mapped) {
  * half-unresolved target (exactly 0.5 -> note fires), and an orphan with no
  * callers at all (total==0 -> note fires). Both emitters must agree. */
 TEST(tool_trace_path_caller_resolution_summary) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "res-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -7539,7 +7565,7 @@ TEST(tool_trace_path_caller_resolution_summary) {
  * edge scan attaches the decoy args/evidence; canonical predecessor selection
  * must attach the edge that actually reaches the root. */
 TEST(tool_trace_path_edge_details_use_canonical_predecessor) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -7632,7 +7658,7 @@ TEST(tool_trace_path_edge_details_use_canonical_predecessor) {
  * data_flow must not discard requested evidence. include_tests exercises the
  * widest flat-table shape and keeps a dotless qualified name in the payload. */
 TEST(tool_trace_path_evidence_columns_align_across_optional_modes) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "ev-align";
     cbm_mcp_server_set_project(srv, proj);
@@ -7798,7 +7824,7 @@ TEST(tool_trace_path_evidence_columns_align_across_optional_modes) {
  * has len(cols)==len(row), and the strategy cell is the class not the args
  * array. */
 TEST(tool_trace_path_evidence_columns_match_header_issue1542) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "ev-order";
     cbm_mcp_server_set_project(srv, proj);
@@ -7914,7 +7940,7 @@ TEST(tool_trace_path_evidence_columns_match_header_issue1542) {
  * node-name field, never the qualified_name (preceded by '.'), so the boundary
  * check is exact. */
 TEST(tool_trace_call_path_depth_clamped) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "depth-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -7969,7 +7995,7 @@ TEST(tool_trace_call_path_depth_clamped) {
  * distinct symbols. RED before the pick_resolved_node real_def_count rule (response
  * merged callerA+callerB), GREEN after (response is ambiguous, no "callers"). */
 TEST(tool_trace_call_path_distinct_defs_not_over_unioned) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "ou-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -8039,7 +8065,7 @@ TEST(tool_trace_call_path_distinct_defs_not_over_unioned) {
  * (one real callable def + a fragment), so it must stay non-ambiguous and the
  * caller sets from both nodes must be unioned. */
 TEST(tool_trace_call_path_dts_stub_unions_with_impl) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "dts-proj";
     cbm_mcp_server_set_project(srv, proj);
@@ -8104,7 +8130,7 @@ TEST(tool_trace_call_path_dts_stub_unions_with_impl) {
 }
 
 TEST(tool_delete_project_not_found) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\","
@@ -8138,7 +8164,7 @@ TEST(tool_delete_project_mutation_guard_blocks_then_releases) {
     cbm_store_close(setup);
     ASSERT_TRUE(cbm_file_exists(db_path));
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     mcp_mutation_guard_probe_t probe = {.deny_begin_call = 1};
     cbm_mcp_server_set_project_mutation_guard(srv, mcp_mutation_guard_probe_begin,
@@ -8178,7 +8204,7 @@ TEST(tool_index_repository_mutation_guard_blocks_before_local_worker) {
     (void)snprintf(root, sizeof(root), "%s/cbm-index-guard-XXXXXX", cbm_tmpdir());
     ASSERT_NOT_NULL(cbm_mkdtemp(root));
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     mcp_mutation_guard_probe_t probe = {.deny_begin_call = 1};
     cbm_mcp_server_set_project_mutation_guard(srv, mcp_mutation_guard_probe_begin,
@@ -8502,7 +8528,7 @@ TEST(tool_project_arg_resolves_unique_tail_issue1025) {
     i1025_write_repo(repo_b, "amb_one");
     i1025_write_repo(repo_c, "amb_two");
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     char args[CBM_SZ_1K];
@@ -8671,7 +8697,7 @@ TEST(tool_query_graph_missing_query) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(tool_index_repository_missing_path) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\","
@@ -8686,7 +8712,7 @@ TEST(tool_index_repository_missing_path) {
 }
 
 TEST(tool_get_code_snippet_missing_qn) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\","
@@ -8701,7 +8727,7 @@ TEST(tool_get_code_snippet_missing_qn) {
 }
 
 TEST(tool_get_code_snippet_not_found) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":32,\"method\":\"tools/call\","
@@ -8717,7 +8743,7 @@ TEST(tool_get_code_snippet_not_found) {
 }
 
 TEST(tool_search_code_missing_pattern) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":33,\"method\":\"tools/call\","
@@ -8737,7 +8763,7 @@ TEST(tool_search_code_missing_pattern) {
  * so well-behaved clients never send it, and the handler clamps because a
  * schema is a request to the client, never a guarantee to the server. */
 TEST(tool_search_code_negative_limit_is_not_echoed_issue1511) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":35,\"method\":\"tools/call\","
                                    "\"params\":{\"name\":\"search_code\","
@@ -8751,7 +8777,7 @@ TEST(tool_search_code_negative_limit_is_not_echoed_issue1511) {
 }
 
 TEST(tool_search_code_limit_declares_a_minimum_issue1511) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":36,\"method\":\"tools/list\",\"params\":{}}");
     ASSERT_NOT_NULL(resp);
@@ -8786,7 +8812,7 @@ TEST(tool_search_code_limit_declares_a_minimum_issue1511) {
 }
 
 TEST(tool_search_code_declares_independent_result_and_raw_content_paging) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":37,\"method\":\"tools/list\",\"params\":{}}");
     ASSERT_NOT_NULL(resp);
@@ -8820,7 +8846,7 @@ TEST(tool_search_code_declares_independent_result_and_raw_content_paging) {
 }
 
 TEST(tool_search_code_no_project) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":34,\"method\":\"tools/call\","
@@ -8877,7 +8903,7 @@ TEST(search_code_preserves_valid_utf8_source) {
           fp);
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "search-utf8";
@@ -8932,7 +8958,7 @@ TEST(search_code_scans_complete_stream_and_ranks_globally) {
     fclose(fp);
     ASSERT_EQ(th_write_file(high_path, "int COMPLETE_SCAN_NEEDLE_high = 1;\n"), 0);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "search-saturation";
@@ -9021,7 +9047,7 @@ TEST(search_code_fails_closed_when_complete_scan_is_impossible) {
     snprintf(tmp, sizeof(tmp), "%s/cbm_srch_incomplete_XXXXXX", cbm_tmpdir());
     ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -9085,7 +9111,7 @@ TEST(search_code_scoped_scan_uses_canonical_file_nodes) {
     ASSERT_EQ(cbm_mkdir(source_dir), 0);
     ASSERT_EQ(th_write_file(source_path, "int FOLDER_SCOPE_NEEDLE = 1;\n"), 0);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -9166,7 +9192,7 @@ TEST(search_code_scoped_file_pattern_is_busybox_portable) {
     ASSERT_EQ(chmod(fake_grep, 0700), 0);
     ASSERT_EQ(th_write_file(source_path, "int BUSYBOX_GREP_NEEDLE = 1;\n"), 0);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -9249,7 +9275,7 @@ TEST(search_code_recursive_fallback_propagates_discovery_failures) {
     ASSERT_EQ(chmod(fake_sort, 0700), 0);
     ASSERT_EQ(th_write_file(victim, "int FALLBACK_STATUS_NEEDLE = 1;\n"), 0);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -9342,7 +9368,7 @@ TEST(search_code_default_budget_limits_raw_rows_before_graph_results) {
     }
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "search-budget";
@@ -9401,7 +9427,7 @@ TEST(search_code_raw_and_directory_remainders_are_independently_pageable) {
                   0);
     }
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -9560,7 +9586,7 @@ TEST(search_code_ranked_results_have_lossless_second_page) {
         ASSERT_EQ(th_write_file(path, "int RESULT_PAGE_NEEDLE = 1;\n"), 0);
     }
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -9676,7 +9702,7 @@ TEST(search_code_ranked_budget_omission_has_lossless_continuation) {
     ASSERT_NOT_NULL(qualified_names[1]);
     ASSERT_NOT_NULL(qualified_names[2]);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -9839,7 +9865,7 @@ TEST(search_code_long_raw_line_is_one_truthfully_truncated_match) {
     fputc('\n', source);
     fclose(source);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "search-long-raw-line";
@@ -9897,7 +9923,7 @@ TEST(search_code_raw_preview_centers_late_match_and_pages_content_bytes) {
     fputs("\nsentinel\n", source);
     fclose(source);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -10067,7 +10093,7 @@ TEST(search_code_match_locations_are_explicitly_bounded_and_expandable) {
     }
     fclose(source);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "search-match-locations";
@@ -10171,7 +10197,7 @@ TEST(search_code_full_preserves_utf8_source) {
     ASSERT_EQ(fwrite(source, 1, sizeof(source) - SKIP_ONE, fp), sizeof(source) - SKIP_ONE);
     ASSERT_EQ(fclose(fp), 0);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -10424,7 +10450,7 @@ TEST(search_code_scoped_path_with_spaces_issue687) {
     fprintf(fp, "package main\n\nfunc HandleRequest() error {\n\treturn nil\n}\n");
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -10503,7 +10529,7 @@ TEST(search_code_scoped_path_with_cjk_root_issue903) {
     fprintf(fp, "package main\n\nfunc HandleRequest() error {\n\treturn nil\n}\n");
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -10579,7 +10605,7 @@ static cbm_mcp_server_t *setup_prefilter_server(char *tmp, size_t tmp_sz, char *
     fprintf(fp, "package vendored\n\nfunc HandleRequest() error {\n\treturn nil\n}\n");
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     if (!srv) {
         return NULL;
     }
@@ -10696,7 +10722,7 @@ TEST(search_code_long_line_does_not_invent_matches) {
     fprintf(fp, "const NEEDLEmarker = 42;\n");
     fclose(fp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     const char *proj = "longline-search";
     cbm_mcp_server_set_project(srv, proj);
@@ -11203,7 +11229,7 @@ TEST(search_code_no_match_is_empty_for_direct_and_scoped_routes) {
     ASSERT_NULL(strstr(scoped_response, "\"isError\":true"));
     ASSERT_NOT_NULL(strstr(scoped_response, "total_grep_matches: 0"));
 
-    cbm_mcp_server_t *direct = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *direct = test_server_all_surface();
     ASSERT_NOT_NULL(direct);
     cbm_store_t *store = cbm_mcp_server_store(direct);
     ASSERT_NOT_NULL(store);
@@ -11434,7 +11460,7 @@ TEST(search_code_ampersand_accepted_issue272) {
 }
 
 TEST(tool_detect_changes_no_project) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":35,\"method\":\"tools/call\","
@@ -11449,7 +11475,7 @@ TEST(tool_detect_changes_no_project) {
 }
 
 TEST(tool_manage_adr_no_project) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":36,\"method\":\"tools/call\","
@@ -11489,7 +11515,7 @@ TEST(tool_manage_adr_get_with_existing_adr) {
     fclose(fp);
 
     /* Create server and register the project */
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11524,7 +11550,7 @@ TEST(tool_manage_adr_get_with_existing_adr) {
  * backend. A manage_adr(update) write must be readable via cbm_store_adr_get
  * (the exact API the UI's /api/adr GET uses). */
 TEST(tool_manage_adr_unified_backend_issue256) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11563,7 +11589,7 @@ TEST(tool_manage_adr_unified_backend_issue256) {
 }
 
 TEST(tool_manage_adr_rejects_removed_sections_argument) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11605,7 +11631,7 @@ TEST(tool_manage_adr_rejects_removed_sections_argument) {
  * the caller did not mean to touch survives only as well as that round-trip. */
 TEST(tool_manage_adr_set_sections_replaces_only_named) {
     const char *project = "adr-sec-named";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11652,7 +11678,7 @@ TEST(tool_manage_adr_set_sections_is_idempotent) {
     const char *project = "adr-sec-idem";
     const char *request = "{\"project\":\"adr-sec-idem\",\"mode\":\"set_sections\","
                           "\"section_updates\":{\"PATTERNS\":\"- Pipeline stages.\"}}";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11701,7 +11727,7 @@ TEST(tool_manage_adr_set_sections_is_idempotent) {
  * the store primitive requires an existing row, so the handler seeds one. */
 TEST(tool_manage_adr_set_sections_creates_when_absent) {
     const char *project = "adr-sec-new";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11732,7 +11758,7 @@ TEST(tool_manage_adr_set_sections_creates_when_absent) {
  * must not take the mutation lease on the way to being rejected. */
 TEST(tool_manage_adr_set_sections_without_updates_errors) {
     const char *project = "adr-sec-missing";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11771,7 +11797,7 @@ TEST(tool_manage_adr_set_sections_without_updates_errors) {
  * writing it twice would duplicate it. Both are refused before a store opens. */
 TEST(tool_manage_adr_set_sections_rejects_unwritable_sections) {
     const char *project = "adr-sec-guards";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11831,7 +11857,7 @@ TEST(tool_manage_adr_set_sections_adds_custom_heading) {
     const char *project = "adr-sec-custom";
     const char *request = "{\"project\":\"adr-sec-custom\",\"mode\":\"set_sections\","
                           "\"section_updates\":{\"DECISIONS\":\"- Chose SQLite.\"}}";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11892,7 +11918,7 @@ TEST(tool_manage_adr_set_sections_preserves_preamble_and_order) {
                          "```md\n## Example\nfenced sample\n```\n\n"
                          "## STACK\nC and SQLite.\n\n"
                          "## PURPOSE\nCanonical one.";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11927,7 +11953,7 @@ TEST(tool_manage_adr_set_sections_preserves_preamble_and_order) {
 TEST(tool_manage_adr_set_sections_refuses_unterminated_fence) {
     const char *project = "adr-sec-fence";
     const char *stored = "## PURPOSE\nFoo\n\n```\nunclosed sample\n\n## STACK\nBar";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -11974,7 +12000,7 @@ TEST(tool_manage_adr_sections_agrees_with_write_path) {
                          "### Sub\n\n"
                          "```md\n## Fenced\n```\n\n"
                          "## DECISIONS\nBar";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -12020,7 +12046,7 @@ TEST(tool_manage_adr_sections_agrees_with_write_path) {
 }
 
 TEST(tool_manage_adr_defaults_to_bounded_outline) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "adr-outline";
@@ -12064,7 +12090,7 @@ TEST(tool_manage_adr_defaults_to_bounded_outline) {
 }
 
 TEST(tool_manage_adr_rejects_unknown_mode_and_empty_update) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     const char *project = "adr-invalid-mode";
@@ -12097,7 +12123,7 @@ TEST(tool_manage_adr_rejects_unknown_mode_and_empty_update) {
  * document rather than leaving a half-applied write. */
 TEST(tool_manage_adr_set_sections_rejects_oversize) {
     const char *project = "adr-sec-cap";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -12141,7 +12167,7 @@ TEST(tool_manage_adr_set_sections_rejects_oversize) {
 /* The mode must be advertised, or callers never learn it exists and keep
  * paying for whole-document rewrites. */
 TEST(tool_manage_adr_set_sections_is_advertised) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
@@ -12157,7 +12183,7 @@ TEST(tool_manage_adr_set_sections_is_advertised) {
 
 TEST(tool_manage_adr_mutation_guard_balances_success) {
     const char *project = "guard-adr-success";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -12188,7 +12214,7 @@ TEST(tool_manage_adr_mutation_guard_balances_success) {
  * and sections must not invoke the blocking guard. */
 TEST(tool_manage_adr_read_paths_skip_blocking_mutation_guard) {
     const char *project = "guard-adr-read";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -12235,7 +12261,7 @@ TEST(tool_manage_adr_read_missing_store_skips_mutation_guard) {
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
 
     const char *project = "guard-adr-missing";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     mcp_mutation_guard_probe_t probe = {0};
     cbm_mcp_server_set_project_mutation_guard(srv, mcp_mutation_guard_probe_begin,
@@ -12287,7 +12313,7 @@ TEST(tool_manage_adr_legacy_migration_tries_without_blocking) {
     ASSERT_EQ(cbm_store_upsert_project(writer, project, root), CBM_STORE_OK);
     cbm_store_close(writer);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     mcp_mutation_guard_probe_t probe = {.deny_try_begin_call = 1};
@@ -12345,7 +12371,7 @@ TEST(tool_raw_dispatch_cancel_is_scoped_non_mutating_and_next_request_clean) {
     char root[256];
     snprintf(root, sizeof(root), "%s/cbm-mcp-raw-adr-XXXXXX", cbm_tmpdir());
     ASSERT_NOT_NULL(cbm_mkdtemp(root));
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -12416,7 +12442,7 @@ TEST(tool_outer_request_scope_preserves_predispatch_cancel) {
     char root[256];
     (void)snprintf(root, sizeof(root), "%s/cbm-mcp-outer-cancel-XXXXXX", cbm_tmpdir());
     bool root_created = cbm_mkdtemp(root) != NULL;
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_store_t *store = cbm_mcp_server_store(srv);
     bool project_ready =
         root_created && store && cbm_store_upsert_project(store, project, root) == CBM_STORE_OK;
@@ -12473,7 +12499,7 @@ TEST(tool_index_repository_early_raw_cancel_survives_index_entry) {
 
     char *project = repo_created ? cbm_project_name_from_path(repo) : NULL;
     cbm_mcp_server_t *srv =
-        cache_created && repo_created && project ? cbm_mcp_server_new(NULL) : NULL;
+        cache_created && repo_created && project ? test_server_all_surface() : NULL;
     mcp_mutation_guard_probe_t probe = {
         .cancel_on_begin_call = 1,
         .cancel_server = srv,
@@ -12617,7 +12643,7 @@ TEST(tool_cross_repo_mutation_guard_sorts_dedupes_and_unwinds) {
         PASS();
     }
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     ASSERT_TRUE(cbm_mcp_server_set_session_context(srv, repo, NULL));
 
@@ -12687,7 +12713,7 @@ TEST(tool_cross_repo_mutation_guard_casefolds_aliases_and_order) {
         PASS();
     }
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     ASSERT_TRUE(cbm_mcp_server_set_session_context(srv, repo, NULL));
 
@@ -12756,7 +12782,7 @@ TEST(tool_cross_repo_rejects_wildcard_mixed_with_named_targets) {
 
     char *project = cbm_project_name_from_path(cache);
     ASSERT_NOT_NULL(project);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     ASSERT_TRUE(cbm_mcp_server_set_session_context(srv, cache, NULL));
 
@@ -12808,7 +12834,7 @@ TEST(tool_cross_repo_checks_cancellation_after_acquiring_leases) {
 
     char *project = cbm_project_name_from_path(cache);
     ASSERT_NOT_NULL(project);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     ASSERT_TRUE(cbm_mcp_server_set_session_context(srv, cache, NULL));
 
@@ -12879,7 +12905,7 @@ TEST(tool_cross_repo_missing_inputs_fail_without_creating_ghost_databases) {
              missing_target);
     ASSERT_FALSE(cbm_file_exists(source_db_path));
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     ASSERT_TRUE(cbm_mcp_server_set_session_context(srv, cache, NULL));
 
@@ -12947,7 +12973,7 @@ TEST(tool_cross_repo_dedupes_targets_before_scanning_and_counting) {
     const char *target_project = "cross-dedupe-target";
     ASSERT_TRUE(mcp_cross_repo_seed_http_match(cache, source_project, target_project, cache));
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     ASSERT_TRUE(cbm_mcp_server_set_session_context(srv, cache, NULL));
 
@@ -13008,7 +13034,7 @@ TEST(tool_cross_repo_honors_source_name_override) {
     const char *target_project = "cross-custom-target";
     ASSERT_TRUE(mcp_cross_repo_seed_http_match(cache, source_project, target_project, cache));
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     ASSERT_TRUE(cbm_mcp_server_set_session_context(srv, cache, NULL));
     char args[CBM_SZ_2K];
@@ -13053,7 +13079,7 @@ TEST(tool_corrupt_store_cleanup_guard_is_balanced_and_not_nested) {
     snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
 
     ASSERT_TRUE(mcp_make_corrupt_project_store(cache, project));
-    cbm_mcp_server_t *query_srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *query_srv = test_server_all_surface();
     ASSERT_NOT_NULL(query_srv);
     mcp_mutation_guard_probe_t query_probe = {
         .observed_db_path = db_path,
@@ -13082,7 +13108,7 @@ TEST(tool_corrupt_store_cleanup_guard_is_balanced_and_not_nested) {
      * already-held lease independently from the query server above. */
     mcp_cleanup_corrupt_backups(cache, project);
     ASSERT_TRUE(mcp_make_corrupt_project_store(cache, project));
-    cbm_mcp_server_t *adr_srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *adr_srv = test_server_all_surface();
     ASSERT_NOT_NULL(adr_srv);
     mcp_mutation_guard_probe_t adr_probe = {
         .observed_db_path = db_path,
@@ -13212,7 +13238,7 @@ TEST(tool_manage_adr_corrupt_store_busy_is_retryable) {
     snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
     ASSERT_TRUE(mcp_make_corrupt_project_store(cache, project));
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     mcp_mutation_guard_probe_t probe = {.deny_try_begin_call = 1};
     cbm_mcp_server_set_project_mutation_guard(srv, mcp_mutation_guard_probe_begin,
@@ -13259,7 +13285,7 @@ TEST(tool_manage_adr_corrupt_store_missing_try_guard_reports_configuration) {
     snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
     ASSERT_TRUE(mcp_make_corrupt_project_store(cache, project));
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     mcp_mutation_guard_probe_t probe = {0};
     cbm_mcp_server_set_project_mutation_guard(srv, mcp_mutation_guard_probe_begin,
@@ -13315,7 +13341,7 @@ TEST(tool_corrupt_store_cleanup_rechecks_generation_after_guard_wait) {
     ASSERT_TRUE(mcp_make_corrupt_project_store(cache, project));
     ASSERT_TRUE(mcp_make_valid_project_store_at(replacement_path, project, replacement_root));
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     mcp_replacing_mutation_guard_t replacement = {
         .replacement_path = replacement_path,
@@ -13395,7 +13421,7 @@ TEST(tool_corrupt_store_cleanup_preserves_existing_backup_and_uses_unique_name) 
     unsigned char *existing_before = mcp_read_file_bytes(existing_backup_path, &existing_len);
     ASSERT_NOT_NULL(existing_before);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     mcp_mutation_guard_probe_t probe = {0};
     cbm_mcp_server_set_project_mutation_guard(srv, mcp_mutation_guard_probe_begin,
@@ -13468,7 +13494,7 @@ TEST(tool_corrupt_store_cleanup_publish_failure_preserves_db_and_wal) {
     ASSERT_TRUE(db_len > 0);
     ASSERT_TRUE(wal_len > 0);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     mcp_mutation_guard_probe_t guard = {0};
     cbm_mcp_server_set_project_mutation_guard(srv, mcp_mutation_guard_probe_begin,
@@ -13542,7 +13568,7 @@ TEST(tool_corrupt_store_cleanup_publishes_complete_wal_snapshot_before_delete) {
     ASSERT_NOT_NULL(db_before);
     ASSERT_NOT_NULL(wal_before);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     mcp_mutation_guard_probe_t guard = {0};
     cbm_mcp_server_set_project_mutation_guard(srv, mcp_mutation_guard_probe_begin,
@@ -13626,7 +13652,7 @@ TEST(tool_index_repository_reports_store_backed_adr) {
     char *project = cbm_project_name_from_path(tmp_dir);
     ASSERT_NOT_NULL(project);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     char args[1024];
@@ -13704,7 +13730,7 @@ TEST(tool_index_repository_resolves_root_path_from_project_name_issue1211) {
     char *project = cbm_project_name_from_path(tmp_dir);
     ASSERT_NOT_NULL(project);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     char index_args[1024];
@@ -13747,7 +13773,7 @@ TEST(tool_index_repository_unknown_project_name_still_requires_repo_path) {
     char *saved_copy = saved ? strdup(saved) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     char *resp =
@@ -13793,7 +13819,7 @@ TEST(tool_index_repository_dot_uses_absolute_project_key_and_preserves_adr) {
     char *project = cbm_project_name_from_path(tmp_dir);
     ASSERT_NOT_NULL(project);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     ASSERT_EQ(cbm_chdir(tmp_dir), 0);
@@ -13867,7 +13893,7 @@ TEST(tool_manage_adr_not_found_rich_error) {
     char *saved_copy = saved ? strdup(saved) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     char *resp = cbm_mcp_handle_tool(srv, "manage_adr",
@@ -13911,7 +13937,7 @@ TEST(tool_manage_adr_get_accepts_abs_path) {
     char *project = cbm_project_name_from_path(tmp_dir);
     ASSERT_NOT_NULL(project);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     char args[1024];
@@ -13989,7 +14015,7 @@ TEST(tool_manage_adr_get_accepts_symlink_path) {
     char *project = cbm_project_name_from_path(tmp_dir);
     ASSERT_NOT_NULL(project);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     char args[1024];
@@ -14043,7 +14069,7 @@ TEST(tool_detect_changes_not_found_rich_error) {
     char *saved_copy = saved ? strdup(saved) : NULL;
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     char *resp =
@@ -14083,7 +14109,7 @@ TEST(tool_detect_changes_invalid_base_is_an_error) {
     const char *saved_cache = getenv("CBM_CACHE_DIR");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -14144,7 +14170,7 @@ TEST(tool_detect_changes_preserves_utf8_git_path_and_impact_seed) {
     const char *saved_cache = getenv("CBM_CACHE_DIR");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -14242,7 +14268,7 @@ TEST(tool_detect_changes_honesty_note_in_both_formats) {
     const char *saved_cache = getenv("CBM_CACHE_DIR");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -14296,14 +14322,33 @@ TEST(tool_detect_changes_honesty_note_in_both_formats) {
 /* ── Fork issue #8: cache retention sweeps + index_status maintenance ── */
 
 static int th_backdate_mtime_days(const char *path, double days) {
-    struct th_utimbuf tb;
     time_t now = time(NULL);
-    tb.actime = (time_t)(now - (time_t)(days * 86400.0));
-    tb.modtime = tb.actime;
+    time_t back = now - (time_t)(days * 86400.0);
+#ifdef _WIN32
+    /* _utime() cannot set a directory's times on Windows, and the sweep keys
+     * the scratch rule on directory mtimes — go through the handle instead. */
+    HANDLE handle = CreateFileA(path, FILE_WRITE_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return 1;
+    }
+    FILETIME ft;
+    long long hundreds = ((long long)back + 11644473600LL) * 10000000LL;
+    ft.dwLowDateTime = (DWORD)(hundreds & 0xFFFFFFFF);
+    ft.dwHighDateTime = (DWORD)((unsigned long long)hundreds >> 32);
+    BOOL ok = SetFileTime(handle, NULL, NULL, &ft);
+    CloseHandle(handle);
+    return ok ? 0 : 1;
+#else
+    struct th_utimbuf tb;
+    tb.actime = back;
+    tb.modtime = back;
     if (th_utime(path, &tb) != 0) {
         return 1;
     }
     return 0;
+#endif
 }
 
 static bool th_file_exists(const char *path) {
@@ -14313,6 +14358,13 @@ static bool th_file_exists(const char *path) {
     }
     fclose(f);
     return true;
+}
+
+/* Directory-aware existence: fopen() cannot open a directory on Windows, so
+ * the file probe above reports false for a perfectly existing directory. */
+static bool th_dir_exists(const char *path) {
+    cbm_path_info_t info;
+    return cbm_path_info_utf8(path, &info) == CBM_PATH_INFO_OK && info.is_directory;
 }
 
 /* Preflight residue + young files -> sweep -> old removed, young kept. */
@@ -14377,8 +14429,8 @@ TEST(cache_sweep_prunes_skip_logs_worker_temp_and_scratch) {
     ASSERT_NOT_NULL(cbm_mkdtemp(scratch_young));
 
     ASSERT_GT(cbm_cache_sweep_search_scratch(), 0);
-    ASSERT_FALSE(th_file_exists(scratch_old));
-    ASSERT_TRUE(th_file_exists(scratch_young));
+    ASSERT_FALSE(th_dir_exists(scratch_old));
+    ASSERT_TRUE(th_dir_exists(scratch_young));
     (void)cbm_rmdir(scratch_young);
 
     ASSERT_EQ(th_rmtree(cache), 0);
@@ -14391,7 +14443,7 @@ TEST(cache_sweep_prunes_skip_logs_worker_temp_and_scratch) {
  * lingers. index_status must surface the churn, recommend a rebuild past the
  * ratio, and never fake precision on the capped orphan probe. */
 TEST(index_status_maintenance_accounts_fts_and_lsp_orphans) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
@@ -14442,6 +14494,11 @@ TEST(index_status_maintenance_accounts_fts_and_lsp_orphans) {
     };
     ASSERT_EQ(cbm_store_upsert_lsp_surface_batch(st, lsp, 2), CBM_STORE_OK);
 
+    /* FTS is backfill-driven (cbm_store_fts_rebuild from the index pipeline),
+     * never upsert-synchronous — populate it the way production does before
+     * reading the accounting. */
+    ASSERT_EQ(cbm_store_fts_rebuild(st, proj, 0), CBM_STORE_OK);
+
     /* Baseline: 2 nodes, 2 FTS rows, 2 lsp rows, exactly 1 orphan. */
     cbm_store_maintenance_stats_t stats;
     ASSERT_EQ(cbm_store_maintenance_stats(st, 512, &stats), CBM_STORE_OK);
@@ -14463,7 +14520,12 @@ TEST(index_status_maintenance_accounts_fts_and_lsp_orphans) {
                         .file_path = "src/tmp.c",
                         .start_line = 1,
                         .end_line = 2};
-        ASSERT_GT(cbm_store_upsert_node(st, &n), 0);
+        int64_t tmp_id = cbm_store_upsert_node(st, &n);
+        ASSERT_GT(tmp_id, 0);
+        /* Production delta indexing drives the FTS backfill itself: the
+         * pipeline calls cbm_store_fts_rebuild with the last-seen id after
+         * upserting, because the store layer never writes FTS on upsert. */
+        ASSERT_EQ(cbm_store_fts_rebuild(st, proj, tmp_id - 1), CBM_STORE_OK);
         ASSERT_EQ(cbm_store_delete_nodes_by_file(st, proj, "src/tmp.c"), CBM_STORE_OK);
     }
 
@@ -14473,7 +14535,8 @@ TEST(index_status_maintenance_accounts_fts_and_lsp_orphans) {
     ASSERT_EQ(stats.lsp_orphans, 1);
 
     /* index_status surfaces it, with rebuild recommended past the ratio. */
-    char *response = cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"maint-proj\"}");
+    char *response =
+        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"maint-proj\",\"format\":\"json\"}");
     ASSERT_NOT_NULL(response);
     char *inner = extract_text_content(response);
     ASSERT_NOT_NULL(inner);
@@ -14521,7 +14584,7 @@ static int deep_fixture_add_node(cbm_store_t *st, const char *proj, const char *
  * and the probe must report the hop-4 tier; the deepen cursor must pull it
  * exactly-once, honoring the cursor's depth over a narrowed depth argument. */
 TEST(tool_trace_path_deepen_cursor_pulls_next_tier) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "deep-proj";
@@ -14609,7 +14672,7 @@ TEST(tool_trace_path_deepen_cursor_pulls_next_tier) {
  * argument cannot sneak past the hash — the pull stays at the cursor's
  * depth); any other param change invalidates both. */
 TEST(tool_trace_path_cursor_generation_matrix) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     const char *proj = "deep-proj";
@@ -14762,7 +14825,7 @@ TEST(tool_detect_changes_finds_nested_untracked_file_and_impact_seed) {
     const char *saved_cache = getenv("CBM_CACHE_DIR");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -14862,7 +14925,7 @@ TEST(tool_detect_changes_escapes_newline_path_in_tree_and_round_trips_json) {
     const char *saved_cache = getenv("CBM_CACHE_DIR");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -14947,7 +15010,7 @@ TEST(tool_detect_changes_staged_rename_uses_exact_destination_record) {
     const char *saved_cache = getenv("CBM_CACHE_DIR");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -15079,7 +15142,7 @@ TEST(tool_detect_changes_contained_commands_clean_up_error_and_success) {
     bool environment_ready = cache_created && cbm_setenv("CBM_CACHE_DIR", cache, 1) == 0;
 
     const char *project = "detect-contained-project";
-    cbm_mcp_server_t *srv = environment_ready && repo_ready ? cbm_mcp_server_new(NULL) : NULL;
+    cbm_mcp_server_t *srv = environment_ready && repo_ready ? test_server_all_surface() : NULL;
     bool server_ready = srv != NULL;
     cbm_store_t *store = srv ? cbm_mcp_server_store(srv) : NULL;
     bool project_ready = store && cbm_store_upsert_project(store, project, repo) == CBM_STORE_OK;
@@ -15170,6 +15233,10 @@ TEST(tool_detect_changes_pages_changed_files_and_honors_semantic_budget) {
         NULL,
     };
     ASSERT_EQ(mcp_test_git(repo, init_args), 0);
+    /* The fixture writes ~360-char paths; stock Windows git stops reporting
+     * untracked files past MAX_PATH unless longpaths is on for the repo. */
+    const char *const longpaths_args[] = {"config", "core.longpaths", "true", NULL};
+    ASSERT_EQ(mcp_test_git(repo, longpaths_args), 0);
     ASSERT_EQ(mcp_test_git(repo, add_args), 0);
     ASSERT_EQ(mcp_test_git(repo, commit_args), 0);
 
@@ -15185,7 +15252,7 @@ TEST(tool_detect_changes_pages_changed_files_and_honors_semantic_budget) {
     const char *saved_cache = getenv("CBM_CACHE_DIR");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -15253,6 +15320,12 @@ TEST(tool_detect_changes_pages_changed_files_and_honors_semantic_budget) {
     yyjson_doc *doc = yyjson_read(inner, strlen(inner), 0);
     ASSERT_NOT_NULL(doc);
     yyjson_val *root = yyjson_doc_get_root(doc);
+    if (yyjson_get_int(yyjson_obj_get(root, "changed_total")) != 25) {
+        fputs("PAGES-RESP>>", stderr);
+        fputs(inner ? inner : "(null)", stderr);
+        fputs("|END", stderr);
+        fputc('\n', stderr);
+    }
     ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "changed_total")), 25);
     ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "changed_returned")), 20);
     ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(root, "changed_has_more")));
@@ -15604,7 +15677,7 @@ TEST(tool_detect_changes_output_budget_sets_truncated_in_tree_and_json) {
     const char *saved_cache = getenv("CBM_CACHE_DIR");
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
     ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -15721,7 +15794,7 @@ TEST(detect_changes_seeds_only_touched_symbol_issue1363) {
     }
 #undef DC1363_GITCFG
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     char idx_args[700];
     snprintf(idx_args, sizeof(idx_args), "{\"repo_path\":\"%s\",\"mode\":\"full\"}", repo);
     char *idx_resp = cbm_mcp_handle_tool(srv, "index_repository", idx_args);
@@ -15804,7 +15877,7 @@ TEST(detect_changes_zero_overlap_falls_back_issue1363) {
     }
 #undef DC1363B_GITCFG
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     char idx_args[700];
     snprintf(idx_args, sizeof(idx_args), "{\"repo_path\":\"%s\",\"mode\":\"full\"}", repo);
     char *idx_resp = cbm_mcp_handle_tool(srv, "index_repository", idx_args);
@@ -15841,7 +15914,7 @@ TEST(detect_changes_zero_overlap_falls_back_issue1363) {
 }
 
 TEST(tool_ingest_traces_basic) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":37,\"method\":\"tools/call\","
@@ -15857,7 +15930,7 @@ TEST(tool_ingest_traces_basic) {
 }
 
 TEST(tool_ingest_traces_empty) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":38,\"method\":\"tools/call\","
@@ -15876,7 +15949,7 @@ TEST(tool_ingest_traces_empty) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(store_idle_eviction) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_mcp_server_set_project(srv, "test-evict");
 
     /* Trigger resolve_store via a tool call to set store_last_used */
@@ -15894,7 +15967,7 @@ TEST(store_idle_eviction) {
 }
 
 TEST(store_idle_no_eviction_within_timeout) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_mcp_server_set_project(srv, "test-evict");
 
     char *resp = cbm_mcp_handle_tool(srv, "get_graph_schema", "{\"project\":\"test-evict\"}");
@@ -15926,7 +15999,7 @@ TEST(store_idle_evict_protects_initial_store) {
 }
 
 TEST(store_idle_evict_access_resets_timer) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     cbm_mcp_server_set_project(srv, "test-evict");
 
     /* First access */
@@ -16038,7 +16111,7 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
     fclose(fp);
 
     /* Create server with in-memory store */
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     if (!srv)
         return NULL;
 
@@ -16333,7 +16406,7 @@ static bool compare_set_has(const yyjson_val *set, uint64_t total, uint64_t retu
 TEST(tool_compare_graphs_streams_stable_deltas_issue525) {
     compare_graphs_fixture_t fixture;
     ASSERT_TRUE(compare_graphs_fixture_open(&fixture));
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = test_server_all_surface();
     ASSERT_NOT_NULL(server);
     cbm_mcp_server_set_tool_profile(server, CBM_MCP_TOOL_PROFILE_ANALYSIS);
 
@@ -16533,7 +16606,7 @@ TEST(tool_compare_graphs_normalizes_legacy_path_separators_issue525) {
                                              "pkg.source", "Function", "src/same.c", "pkg.target",
                                              "Function", "src/target.c", "CALLS"));
 
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = test_server_all_surface();
     ASSERT_NOT_NULL(server);
     char *response = cbm_mcp_handle_tool(
         server, "compare_graphs",
@@ -16596,7 +16669,7 @@ TEST(tool_compare_graphs_sanitizes_legacy_invalid_utf8_issue525) {
         target_path, "utftarget525", invalid_generation, invalid_index_mode, invalid_qn,
         invalid_label, invalid_file, safe_qn, "Function", "src/sink.c", invalid_type));
 
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = test_server_all_surface();
     ASSERT_NOT_NULL(server);
     char *response = cbm_mcp_handle_tool(
         server, "compare_graphs",
@@ -16642,7 +16715,7 @@ TEST(tool_compare_graphs_sanitizes_legacy_invalid_utf8_issue525) {
 TEST(tool_compare_graphs_bind_failures_are_atomic_issue525) {
     compare_graphs_fixture_t fixture;
     ASSERT_TRUE(compare_graphs_fixture_open(&fixture));
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = test_server_all_surface();
     ASSERT_NOT_NULL(server);
     static const int fail_after[] = {0, 4, 6};
     for (size_t index = 0; index < sizeof(fail_after) / sizeof(fail_after[0]); index++) {
@@ -16666,7 +16739,7 @@ TEST(tool_compare_graphs_bind_failures_are_atomic_issue525) {
 TEST(tool_compare_graphs_midscan_cancel_restores_store_state_issue525) {
     compare_graphs_fixture_t fixture;
     ASSERT_TRUE(compare_graphs_fixture_open(&fixture));
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = test_server_all_surface();
     ASSERT_NOT_NULL(server);
 
     cbm_store_compare_test_cancel_after(1);
@@ -16717,7 +16790,7 @@ TEST(tool_compare_graphs_midscan_cancel_restores_store_state_issue525) {
 TEST(tool_compare_graphs_progress_cancel_clears_handler_issue525) {
     compare_graphs_fixture_t fixture;
     ASSERT_TRUE(compare_graphs_fixture_open(&fixture));
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = test_server_all_surface();
     ASSERT_NOT_NULL(server);
 
     cbm_store_compare_test_cancel_from_progress(true);
@@ -16778,7 +16851,7 @@ TEST(tool_compare_graphs_enforces_encoded_budget_issue525) {
                                                 large_name));
     free(large_name);
 
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = test_server_all_surface();
     ASSERT_NOT_NULL(server);
     char *response = cbm_mcp_handle_tool(
         server, "compare_graphs",
@@ -16802,7 +16875,7 @@ TEST(tool_compare_graphs_enforces_encoded_budget_issue525) {
 TEST(tool_compare_graphs_validation_and_scan_cap_are_atomic_issue525) {
     compare_graphs_fixture_t fixture;
     ASSERT_TRUE(compare_graphs_fixture_open(&fixture));
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = test_server_all_surface();
     ASSERT_NOT_NULL(server);
 
     char equal_path[768];
@@ -16895,7 +16968,7 @@ TEST(tool_compare_graphs_cancel_and_readonly_handles_release_issue525) {
     ASSERT_FALSE(cbm_file_exists(target_wal));
     ASSERT_FALSE(cbm_file_exists(target_shm));
 
-    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *server = test_server_all_surface();
     ASSERT_NOT_NULL(server);
     ASSERT_TRUE(cbm_mcp_server_request_scope_begin(server));
     ASSERT_TRUE(cbm_mcp_server_cancel_active(server));
@@ -17937,7 +18010,7 @@ TEST(tool_resolve_store_by_internal_name_issue704) {
     ASSERT_NOT_NULL(gp);
     fclose(gp);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     /* ── A: list_projects reports INTERNAL names; filters the ghost ── */
@@ -18090,7 +18163,7 @@ TEST(tool_list_projects_ignores_missed_shadow_issue1044) {
     ASSERT_EQ(cbm_store_upsert_project(st, "delta1044::missed", ""), CBM_STORE_OK);
     cbm_store_close(st);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     /* ── A + B: primary advertised, shadow hidden ─────────────────── */
@@ -18480,7 +18553,7 @@ static int idx823_supervised_name_override_check(const char *repo_dir, const cha
     cbm_setenv("CBM_INDEX_MAX_RESTARTS", "1", 1);
     cbm_setenv("CBM_INDEX_WORKER_TIMEOUT_S", "30", 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     if (!srv) {
         return IDX823_NO_SERVER;
     }
@@ -18607,7 +18680,7 @@ TEST(index_repository_over_budget_reports_named_reason) {
     cbm_setenv("CBM_WORKERS", "4", 1);
 
     bool files_ok = budget_fixture_write(repo, 1);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     bool had_server = srv != NULL;
     char args[CBM_SZ_2K];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", repo);
@@ -18820,7 +18893,7 @@ enum {
 static int idx845_index_inprocess_check(const char *repo_dir) {
     int spawns_before = cbm_index_supervisor_spawn_count();
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     if (!srv) {
         return IDX845_NO_RESULT;
     }
@@ -18963,7 +19036,7 @@ int mcp_test_idxfailclosed_supervisor_start_check(const char *repo_dir, const ch
     cbm_index_supervisor_mark_host();
     (void)cbm_setenv("CBM_INDEX_SUPERVISOR", "0", 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     if (!srv) {
         return IDXFAILCLOSED_NO_SERVER;
     }
@@ -19126,7 +19199,7 @@ static int idx832_supervised_route_check(const char *repo_dir) {
     /* Store-level proof the worker child did real work: the Function node it wrote
      * must be queryable from a fresh server reading the DB the child produced. */
     char *project = cbm_project_name_from_path(repo_dir);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     if (!srv) {
         free(project);
         return IDX832_SERVER_FAIL;
@@ -19288,7 +19361,7 @@ static int idxpar_recovery_check(const char *repo_dir) {
 
     /* Store proof: an innocent's Function node exists. */
     char *project = cbm_project_name_from_path(repo_dir);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     int code = IDXPAR_OK;
     if (srv && project) {
         char q[512];
@@ -19345,7 +19418,7 @@ static int idxpar_exit_nonzero_recovery_check(const char *repo_dir) {
     }
 
     char *project = cbm_project_name_from_path(repo_dir);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     int code = IDXPAR_OK;
     if (srv && project) {
         char q[512];
@@ -19437,7 +19510,7 @@ static void idx773_write_py_repo(const char *dir, int files, int variant) {
 
 static int idx773_double_index_check(const char *dir_a, const char *dir_b) {
     cbm_setenv("CBM_INDEX_SUPERVISOR", "0", 1);
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     if (!srv) {
         return IDX773_FIRST_FAILED;
     }
@@ -19496,7 +19569,7 @@ TEST(sequential_service_edge_props_are_valid_json_issue898) {
           f);
     fclose(f);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     char args[CBM_SZ_512];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", tmp);
@@ -19925,7 +19998,7 @@ static int auto_watch_connect_watch_count(const char *auto_watch_value) {
             cbm_config_set(cfg, CBM_CONFIG_AUTO_WATCH, auto_watch_value);
         }
 
-        cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+        cbm_mcp_server_t *srv = test_server_all_surface();
         if (srv) {
             cbm_mcp_server_set_watcher(srv, watcher);
             cbm_mcp_server_set_config(srv, cfg);
@@ -19954,11 +20027,20 @@ static int auto_watch_connect_watch_count(const char *auto_watch_value) {
     return count;
 }
 
-/* Default (key unset) → watcher registered on connect. Guards the
- * no-behavior-change promise of the auto_watch gate: existing users keep
- * background auto-sync without touching config. */
-TEST(mcp_auto_watch_default_registers_watcher_on_connect) {
+/* Fork patch (fork issue #3): auto_watch defaults to false, so an unset key
+ * registers NO watcher on connect — background auto-sync is opt-in. */
+TEST(mcp_auto_watch_default_skips_watcher_on_connect) {
     int count = auto_watch_connect_watch_count(NULL);
+    if (count < 0) {
+        PASS(); /* fixture setup failed (tmpdir/cwd unavailable) — skip */
+    }
+    ASSERT_EQ(count, 0);
+    PASS();
+}
+
+/* auto_watch=true → watcher registered on connect. */
+TEST(mcp_auto_watch_true_registers_watcher_on_connect) {
+    int count = auto_watch_connect_watch_count("true");
     if (count < 0) {
         PASS(); /* fixture setup failed (tmpdir/cwd unavailable) — skip */
     }
@@ -20036,7 +20118,7 @@ TEST(tool_index_status_freshness_fresh_pending_reindexed_and_absent) {
         FAIL("git commit failed");
     }
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -20251,7 +20333,7 @@ static bool autoindex_limit_probe(const autoindex_limit_probe_t *probe, char *sk
         cbm_config_set(cfg, CBM_CONFIG_AUTO_INDEX, "true");
         cbm_config_set(cfg, CBM_CONFIG_AUTO_INDEX_LIMIT, limit);
 
-        cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+        cbm_mcp_server_t *srv = test_server_all_surface();
         if (srv) {
             autoindex_skip_log[0] = '\0';
             autoindex_saw_done = false;
@@ -20651,7 +20733,7 @@ TEST(mcp_path_within_root_rejects_escape) {
  * --output=<path> writes the diff to an arbitrary file) rather than a ref. It
  * must be rejected up front, alongside the shell-metacharacter check. */
 TEST(detect_changes_rejects_option_like_base_branch) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":77,\"method\":\"tools/call\","
              "\"params\":{\"name\":\"detect_changes\","
@@ -20666,7 +20748,7 @@ TEST(detect_changes_rejects_option_like_base_branch) {
 TEST(detect_changes_rejects_windows_cmd_metacharacters_in_base_branch) {
 #ifdef _WIN32
     const char *const branches[] = {"topic%PATH%", "topic!name!", "topic^name"};
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     for (size_t i = 0; i < sizeof(branches) / sizeof(branches[0]); i++) {
         char request[512];
@@ -20692,7 +20774,7 @@ TEST(detect_changes_rejects_windows_cmd_metacharacters_in_project_root) {
     const char *const roots[] = {"C:\\cbm-root-%PATH%", "C:\\cbm-root-!name!",
                                  "C:\\cbm-root-^name"};
     const char *project = "windows-cmd-root-validation";
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -20727,7 +20809,7 @@ TEST(index_repository_refuses_overbroad_roots_by_default) {
     char *saved_copy = saved ? strdup(saved) : NULL;
     cbm_unsetenv("CBM_ALLOWED_ROOT");
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
 
     /* A top-level system tree: refused on breadth, with no configuration. */
@@ -20761,7 +20843,7 @@ TEST(index_repository_honors_allowed_root) {
     }
     cbm_setenv("CBM_ALLOWED_ROOT", allowed, 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     char args[1024];
     snprintf(args, sizeof(args),
              "{\"jsonrpc\":\"2.0\",\"id\":88,\"method\":\"tools/call\","
@@ -20803,7 +20885,7 @@ TEST(index_repository_relative_path_uses_explicit_session_root) {
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
     cbm_setenv("CBM_INDEX_SUPERVISOR", "0", 1);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_mcp_server_t *srv = test_server_all_surface();
     bool context_set = srv && cbm_mcp_server_set_session_context(srv, session_root, session_root);
     const char request[] = "{\"jsonrpc\":\"2.0\",\"id\":89,\"method\":\"tools/call\","
                            "\"params\":{\"name\":\"index_repository\","
@@ -21638,7 +21720,8 @@ SUITE(mcp) {
     RUN_TEST(tool_list_projects_ignores_missed_shadow_issue1044);
 
     /* auto_watch gate (distilled from PR #625) */
-    RUN_TEST(mcp_auto_watch_default_registers_watcher_on_connect);
+    RUN_TEST(mcp_auto_watch_default_skips_watcher_on_connect);
+    RUN_TEST(mcp_auto_watch_true_registers_watcher_on_connect);
     RUN_TEST(mcp_auto_watch_false_skips_watcher_on_connect);
     RUN_TEST(tool_index_status_freshness_fresh_pending_reindexed_and_absent);
     RUN_TEST(mcp_auto_watch_false_skips_supervised_autoindex_issue853);

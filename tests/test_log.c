@@ -55,8 +55,9 @@ static const char *capture_end(void) {
 }
 
 TEST(log_level_default) {
-    /* Default level should be INFO */
-    ASSERT_EQ(cbm_log_get_level(), CBM_LOG_INFO);
+    /* Fork patch (fork issue #3): the default level is error — info/debug are
+     * opt-in via CBM_LOG_LEVEL, and stdout stays quiet by default. */
+    ASSERT_EQ(cbm_log_get_level(), CBM_LOG_ERROR);
     PASS();
 }
 
