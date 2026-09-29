@@ -5898,6 +5898,290 @@ static char *query_graph_budget_floor_text(const cbm_cypher_result_t *result, in
     return cbm_sb_finish(&sb);
 }
 
+/* ── Unknown-property validation for query_graph (fork fail-loud law) ──
+ * The engine evaluates a missing property as NULL per row: a typo like
+ * WHERE f.bogus = 1 yields an authoritative-looking total:0 and RETURN
+ * f.bogus a column of empty values (measured 2026-09-30 on v0.11.0-fork.2).
+ * The catalog check rejects such queries before they run. It fails open
+ * everywhere it cannot judge — parse failure (execute() reports its own),
+ * labels or edge types absent from the catalog, virtual variables (WITH
+ * aliases), untyped relationships, and graph="missed" — so the check must
+ * never reject a query it does not understand. */
+typedef struct {
+    const cbm_schema_info_t *schema;
+    const cbm_node_pattern_t *nodes[32]; /* variable -> declared label */
+    int node_count;
+    const cbm_rel_pattern_t *rels[32];   /* variable -> declared types */
+    int rel_count;
+    char violations[2][96];              /* formatted "var.prop on :Label" */
+    int violation_count;
+} cypher_prop_check_t;
+
+static const cbm_label_count_t *cypher_prop_label(const cypher_prop_check_t *c,
+                                                  const char *label) {
+    for (int i = 0; i < c->schema->node_label_count; i++) {
+        if (c->schema->node_labels[i].label && strcmp(c->schema->node_labels[i].label, label) == 0) {
+            return &c->schema->node_labels[i];
+        }
+    }
+    return NULL;
+}
+
+static const cbm_type_count_t *cypher_prop_edge_type(const cypher_prop_check_t *c,
+                                                     const char *type) {
+    for (int i = 0; i < c->schema->edge_type_count; i++) {
+        if (c->schema->edge_types[i].type && strcmp(c->schema->edge_types[i].type, type) == 0) {
+            return &c->schema->edge_types[i];
+        }
+    }
+    return NULL;
+}
+
+static bool cypher_prop_label_has(const cbm_label_count_t *l, const char *prop) {
+    for (int i = 0; i < l->property_count; i++) {
+        if (l->properties[i] && strcmp(l->properties[i], prop) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cypher_prop_type_has(const cbm_type_count_t *t, const char *prop) {
+    for (int i = 0; i < t->property_count; i++) {
+        if (t->properties[i] && strcmp(t->properties[i], prop) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cypher_prop_var_node(const cypher_prop_check_t *c, const char *var,
+                                 const cbm_node_pattern_t **out) {
+    for (int i = 0; i < c->node_count; i++) {
+        if (strcmp(c->nodes[i]->variable, var) == 0) {
+            *out = c->nodes[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cypher_prop_var_edge(const cypher_prop_check_t *c, const char *var,
+                                 const cbm_rel_pattern_t **out) {
+    for (int i = 0; i < c->rel_count; i++) {
+        if (strcmp(c->rels[i]->variable, var) == 0) {
+            *out = c->rels[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static void cypher_prop_note_violation(cypher_prop_check_t *c, const char *var, const char *prop,
+                                       const char *label, bool is_edge) {
+    if (c->violation_count >= 2) {
+        return;
+    }
+    snprintf(c->violations[c->violation_count], sizeof(c->violations[0]), "%s.%s on :%s%s", var,
+             prop, label, is_edge ? " (edge)" : "");
+    c->violation_count++;
+}
+
+static void cypher_prop_check_ref(cypher_prop_check_t *c, const char *var, const char *prop) {
+    if (c->violation_count >= 2 || !var || !prop) {
+        return;
+    }
+    const cbm_node_pattern_t *np = NULL;
+    if (cypher_prop_var_node(c, var, &np)) {
+        if (!np->label) {
+            return; /* unlabeled pattern: no catalog row to judge against */
+        }
+        const cbm_label_count_t *l = cypher_prop_label(c, np->label);
+        if (!l) {
+            return; /* label has no nodes in this graph: fail open */
+        }
+        if (!cypher_prop_label_has(l, prop)) {
+            cypher_prop_note_violation(c, var, prop, np->label, false);
+        }
+        return;
+    }
+    const cbm_rel_pattern_t *rp = NULL;
+    if (cypher_prop_var_edge(c, var, &rp)) {
+        if (rp->type_count == 0) {
+            return; /* untyped relationship: skip */
+        }
+        for (int i = 0; i < rp->type_count; i++) {
+            const cbm_type_count_t *t = cypher_prop_edge_type(c, rp->types[i]);
+            if (!t) {
+                return; /* type absent from catalog: fail open */
+            }
+            if (cypher_prop_type_has(t, prop)) {
+                return; /* known on at least one matched type */
+            }
+        }
+        cypher_prop_note_violation(c, var, prop, rp->types[0], true);
+    }
+    /* else: virtual variable (WITH alias, UNWIND) — skip */
+}
+
+static void cypher_prop_check_func_args(cypher_prop_check_t *c, const cbm_func_arg_t *args,
+                                        int count) {
+    for (int i = 0; i < count; i++) {
+        cypher_prop_check_ref(c, args[i].variable, args[i].property);
+    }
+}
+
+static void cypher_prop_check_condition(cypher_prop_check_t *c, const cbm_condition_t *cond) {
+    if (!cond) {
+        return;
+    }
+    cypher_prop_check_ref(c, cond->variable, cond->property);
+    if (cond->func) {
+        cypher_prop_check_func_args(c, cond->args, cond->arg_count);
+    }
+}
+
+static void cypher_prop_check_expr(cypher_prop_check_t *c, const cbm_expr_t *e) {
+    if (!e || c->violation_count >= 2) {
+        return;
+    }
+    if (e->type == EXPR_CONDITION) {
+        cypher_prop_check_condition(c, &e->cond);
+        return;
+    }
+    cypher_prop_check_expr(c, e->left);
+    cypher_prop_check_expr(c, e->right);
+}
+
+static void cypher_prop_check_where(cypher_prop_check_t *c, const cbm_where_clause_t *w) {
+    if (!w) {
+        return;
+    }
+    cypher_prop_check_expr(c, w->root);
+    for (int i = 0; i < w->count; i++) {
+        cypher_prop_check_condition(c, &w->conditions[i]);
+    }
+}
+
+static void cypher_prop_check_case(cypher_prop_check_t *c, const cbm_case_expr_t *kase) {
+    if (!kase) {
+        return;
+    }
+    for (int i = 0; i < kase->branch_count; i++) {
+        cypher_prop_check_expr(c, kase->branches[i].when_expr);
+    }
+}
+
+static void cypher_prop_check_return(cypher_prop_check_t *c, const cbm_return_clause_t *rc) {
+    if (!rc) {
+        return;
+    }
+    for (int i = 0; i < rc->count; i++) {
+        const cbm_return_item_t *item = &rc->items[i];
+        cypher_prop_check_ref(c, item->variable, item->property);
+        cypher_prop_check_func_args(c, item->args, item->arg_count);
+        cypher_prop_check_case(c, item->kase);
+    }
+    for (int i = 0; i < rc->order_key_count; i++) {
+        const char *key = rc->order_keys[i];
+        if (!key) {
+            continue;
+        }
+        const char *dot = strchr(key, '.');
+        if (dot == key || !dot) {
+            continue; /* alias or aggregate key, no variable.property shape */
+        }
+        char var[64];
+        size_t vlen = (size_t)(dot - key);
+        if (vlen >= sizeof(var)) {
+            continue;
+        }
+        memcpy(var, key, vlen);
+        var[vlen] = '\0';
+        cypher_prop_check_ref(c, var, dot + 1);
+    }
+}
+
+static void cypher_prop_collect_bindings(cypher_prop_check_t *c, const cbm_query_t *q) {
+    for (const cbm_query_t *qq = q; qq; qq = qq->union_next) {
+        for (int p = 0; p < qq->pattern_count; p++) {
+            const cbm_pattern_t *pat = &qq->patterns[p];
+            for (int i = 0; i < pat->node_count && c->node_count < 32; i++) {
+                if (pat->nodes[i].variable) {
+                    c->nodes[c->node_count++] = &pat->nodes[i];
+                }
+            }
+            for (int i = 0; i < pat->rel_count && c->rel_count < 32; i++) {
+                if (pat->rels[i].variable) {
+                    c->rels[c->rel_count++] = &pat->rels[i];
+                }
+            }
+        }
+    }
+}
+
+static void cypher_prop_walk(cypher_prop_check_t *c, const cbm_query_t *q) {
+    for (const cbm_query_t *qq = q; qq && c->violation_count < 2; qq = qq->union_next) {
+        for (int p = 0; p < qq->pattern_count; p++) {
+            const cbm_pattern_t *pat = &qq->patterns[p];
+            for (int i = 0; i < pat->node_count; i++) {
+                const cbm_node_pattern_t *np = &pat->nodes[i];
+                for (int k = 0; k < np->prop_count; k++) {
+                    cypher_prop_check_ref(c, np->variable, np->props[k].key);
+                }
+            }
+        }
+        cypher_prop_check_where(c, qq->where);
+        cypher_prop_check_return(c, qq->with_clause);
+        cypher_prop_check_where(c, qq->post_with_where);
+        cypher_prop_check_return(c, qq->ret);
+        /* unwind_expr is a stringly-typed expression: skipped in v1 */
+    }
+}
+
+/* Heap-allocated teaching error when the query references properties the
+ * catalog does not know; NULL when the query may run. */
+static char *validate_cypher_property_refs(cbm_store_t *store, const char *project,
+                                           const char *query) {
+    cbm_query_t *ast = NULL;
+    char *parse_error = NULL;
+    if (cbm_cypher_parse(query, &ast, &parse_error) != 0 || !ast) {
+        free(parse_error);
+        return NULL; /* execute() re-parses and reports the same error */
+    }
+    cbm_schema_info_t schema = {0};
+    if (cbm_store_get_schema(store, project, &schema) != CBM_STORE_OK) {
+        cbm_store_schema_free(&schema);
+        cbm_query_free(ast);
+        return NULL; /* no catalog: fail open */
+    }
+    cypher_prop_check_t check = {0};
+    check.schema = &schema;
+    cypher_prop_collect_bindings(&check, ast);
+    cypher_prop_walk(&check, ast);
+    char *result = NULL;
+    if (check.violation_count > 0) {
+        char msg[CBM_SZ_1K];
+        if (check.violation_count == 1) {
+            snprintf(msg, sizeof(msg),
+                     "unknown property \"%s\" — the engine would evaluate it as an empty value "
+                     "and return a misleading total: 0. Discover queryable properties with "
+                     "get_graph_schema(project, diagnostics=\"full\").",
+                     check.violations[0]);
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "unknown properties \"%s\", \"%s\" — the engine would evaluate them as "
+                     "empty values and return a misleading total: 0. Discover queryable "
+                     "properties with get_graph_schema(project, diagnostics=\"full\").",
+                     check.violations[0], check.violations[1]);
+        }
+        result = heap_strdup(msg);
+    }
+    cbm_store_schema_free(&schema);
+    cbm_query_free(ast);
+    return result;
+}
+
 static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     char *query = cbm_mcp_get_string_arg(args, "query");
     char *project = get_project_arg(args);
@@ -5949,6 +6233,18 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
         free(project);
         free(query);
         return not_indexed;
+    }
+
+    if (!missed_graph) {
+        char *prop_err = validate_cypher_property_refs(store, project, query);
+        if (prop_err) {
+            char *_res = cbm_mcp_text_result(prop_err, true);
+            free(prop_err);
+            free(cursor_arg);
+            free(project);
+            free(query);
+            return _res;
+        }
     }
 
     char covproj[CBM_SZ_512];
@@ -9472,6 +9768,23 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
                  "invalid direction \"%s\" — use \"inbound\" (callers), \"outbound\" (callees), "
                  "or \"both\"",
                  direction);
+        free(func_name);
+        free(project);
+        free(direction);
+        free(mode);
+        free(param_name);
+        return cbm_mcp_text_result(errbuf, true);
+    }
+    /* Same teaching-error contract as direction: an unknown mode silently fell
+     * through to plain calls semantics (data_flow/cross_service flags false)
+     * while the response echoed the bogus mode verbatim. */
+    if (mode && strcmp(mode, "calls") != 0 && strcmp(mode, "data_flow") != 0 &&
+        strcmp(mode, "cross_service") != 0) {
+        char errbuf[CBM_SZ_256];
+        snprintf(errbuf, sizeof(errbuf),
+                 "invalid mode \"%s\" — use \"calls\" (call-graph trace), \"data_flow\" "
+                 "(argument-aware), or \"cross_service\" (service edges)",
+                 mode);
         free(func_name);
         free(project);
         free(direction);
@@ -16376,6 +16689,24 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
                  "invalid direction \"%s\" — use \"inbound\" (blast radius: transitive callers), "
                  "\"outbound\" (dependencies), or \"both\"",
                  direction);
+        free(direction);
+        free(root_path);
+        free(project);
+        free(base_branch);
+        free(scope);
+        return cbm_mcp_text_result(errbuf, true);
+    }
+    /* Same contract as direction: an unknown scope silently flipped to the
+     * "files" semantics (want_symbols = false) while the caller asked for the
+     * symbol blast radius — the coerce happened in a boolean three-way, far
+     * from where the response is shaped. */
+    if (scope && strcmp(scope, "files") != 0 && strcmp(scope, "impact") != 0 &&
+        strcmp(scope, "symbols") != 0) {
+        char errbuf[CBM_SZ_256];
+        snprintf(errbuf, sizeof(errbuf),
+                 "invalid scope \"%s\" — use \"files\" (changed files only), \"impact\" "
+                 "(files + transitive symbol blast radius), or the legacy \"symbols\"",
+                 scope);
         free(direction);
         free(root_path);
         free(project);

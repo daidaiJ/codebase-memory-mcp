@@ -7569,6 +7569,42 @@ TEST(tool_trace_path_caller_resolution_summary) {
  * node and sorts before its real inbound predecessor. An arbitrary incident-
  * edge scan attaches the decoy args/evidence; canonical predecessor selection
  * must attach the edge that actually reaches the root. */
+/* Same fail-loud contract for trace_path's mode: an unknown mode silently ran
+ * plain calls semantics while echoing the bogus mode verbatim. */
+TEST(tool_trace_path_invalid_mode_is_teaching_error) {
+    char cache[CBM_SZ_4K];
+    snprintf(cache, sizeof(cache), "%s/cbm-trace-invalid-mode-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
+    cbm_mcp_server_t *srv = test_server_all_surface();
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    const char *project = "trace-invalid-mode-project";
+    ASSERT_EQ(cbm_store_upsert_project(store, project, cbm_tmpdir()), CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, project);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "trace_path",
+        "{\"project\":\"trace-invalid-mode-project\",\"function_name\":\"whatever\","
+        "\"mode\":\"blast_radius\"}");
+    bool rejected = response && strstr(response, "invalid mode") &&
+                    strstr(response, "blast_radius") && strstr(response, "data_flow") &&
+                    strstr(response, "\"isError\":true");
+
+    free(response);
+    cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    ASSERT_EQ(th_rmtree(cache), 0);
+
+    ASSERT_TRUE(rejected);
+    PASS();
+}
+
 TEST(tool_trace_path_edge_details_use_canonical_predecessor) {
     cbm_mcp_server_t *srv = test_server_all_surface();
     ASSERT_NOT_NULL(srv);
@@ -14137,6 +14173,161 @@ TEST(tool_detect_changes_invalid_base_is_an_error) {
     ASSERT_EQ(th_rmtree(repo), 0);
 
     ASSERT_TRUE(errored);
+    PASS();
+}
+
+/* Fork fail-loud law (2026-09-30): query_graph evaluated unknown properties
+ * as NULL per row, so a typo in WHERE yielded an authoritative-looking
+ * total:0 and RETURN an empty column. The catalog check rejects the query
+ * before it runs; WITH aliases and other virtual variables stay legal. */
+TEST(tool_query_graph_unknown_property_is_teaching_error) {
+    cbm_mcp_server_t *srv = test_server_all_surface();
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    const char *project = "query-prop-contract";
+    ASSERT_EQ(cbm_store_upsert_project(store, project, cbm_tmpdir()), CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, project);
+    cbm_node_t fn_a = {.project = project,
+                       .label = "Function",
+                       .name = "prop_a",
+                       .qualified_name = "fixture.prop_a",
+                       .file_path = "src/a.c",
+                       .start_line = 1,
+                       .end_line = 2,
+                       .properties_json = "{\"complexity\":7,\"cognitive\":2}"};
+    int64_t a_id = cbm_store_upsert_node(store, &fn_a);
+    ASSERT_GT(a_id, 0);
+    cbm_node_t fn_b = {.project = project,
+                       .label = "Function",
+                       .name = "prop_b",
+                       .qualified_name = "fixture.prop_b",
+                       .file_path = "src/b.c",
+                       .start_line = 3,
+                       .end_line = 4,
+                       .properties_json = "{\"complexity\":12}"};
+    int64_t b_id = cbm_store_upsert_node(store, &fn_b);
+    ASSERT_GT(b_id, 0);
+    cbm_edge_t calls = {.project = project,
+                        .source_id = a_id,
+                        .target_id = b_id,
+                        .type = "CALLS",
+                        .properties_json = "{\"arg\":\"x\"}"};
+    ASSERT_GT(cbm_store_insert_edge(store, &calls), 0);
+
+    /* WHERE references a property the catalog does not know. */
+    char *resp = cbm_mcp_handle_tool(
+        srv, "query_graph",
+        "{\"project\":\"query-prop-contract\",\"query\":\"MATCH (f:Function) WHERE "
+        "f.bogus_flag = 1 RETURN f.qualified_name\"}");
+    bool where_rejected = resp && strstr(resp, "unknown property") &&
+                          strstr(resp, "bogus_flag") && strstr(resp, "\"isError\":true");
+    free(resp);
+
+    /* RETURN projection of an unknown property. */
+    resp = cbm_mcp_handle_tool(
+        srv, "query_graph",
+        "{\"project\":\"query-prop-contract\",\"query\":\"MATCH (f:Function) RETURN "
+        "f.bogus_prop\"}");
+    bool return_rejected = resp && strstr(resp, "unknown property") &&
+                           strstr(resp, "bogus_prop") && strstr(resp, "\"isError\":true");
+    free(resp);
+
+    /* Inline pattern property filter (string value: numeric literals are a
+     * parse error in this engine, so the silent-empty shape needs a string). */
+    resp = cbm_mcp_handle_tool(
+        srv, "query_graph",
+        "{\"project\":\"query-prop-contract\",\"query\":\"MATCH (f:Function {bogus: 'x'}) "
+        "RETURN f.qualified_name\"}");
+    bool inline_rejected =
+        resp && strstr(resp, "unknown property") && strstr(resp, "\"isError\":true");
+    free(resp);
+
+    /* ORDER BY key in variable.property shape. */
+    resp = cbm_mcp_handle_tool(
+        srv, "query_graph",
+        "{\"project\":\"query-prop-contract\",\"query\":\"MATCH (f:Function) RETURN "
+        "f.qualified_name ORDER BY f.bogus_key\"}");
+    bool order_rejected = resp && strstr(resp, "unknown property") &&
+                          strstr(resp, "bogus_key") && strstr(resp, "\"isError\":true");
+    free(resp);
+
+    /* Edge property against a typed relationship whose type is cataloged. */
+    resp = cbm_mcp_handle_tool(
+        srv, "query_graph",
+        "{\"project\":\"query-prop-contract\",\"query\":\"MATCH (a:Function)-[r:CALLS]->"
+        "(b:Function) WHERE r.bogus_edge = 1 RETURN a.qualified_name\"}");
+    bool edge_rejected = resp && strstr(resp, "unknown property") &&
+                         strstr(resp, "bogus_edge") && strstr(resp, "\"isError\":true");
+    free(resp);
+
+    /* WITH alias creates a virtual variable: fail-open, the query runs. */
+    resp = cbm_mcp_handle_tool(
+        srv, "query_graph",
+        "{\"project\":\"query-prop-contract\",\"query\":\"MATCH (f:Function) WITH "
+        "f.qualified_name AS q WHERE q CONTAINS 'prop' RETURN q\"}");
+    bool with_alias_runs = resp && !strstr(resp, "unknown property") &&
+                           !strstr(resp, "\"isError\":true") && strstr(resp, "fixture.prop_a");
+    free(resp);
+
+    /* Known properties keep working. */
+    resp = cbm_mcp_handle_tool(
+        srv, "query_graph",
+        "{\"project\":\"query-prop-contract\",\"query\":\"MATCH (f:Function) WHERE "
+        "f.complexity > 5 RETURN f.qualified_name\"}");
+    bool known_props_run = resp && !strstr(resp, "unknown property") &&
+                           !strstr(resp, "\"isError\":true") && strstr(resp, "fixture.prop_b");
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+
+    ASSERT_TRUE(where_rejected);
+    ASSERT_TRUE(return_rejected);
+    ASSERT_TRUE(inline_rejected);
+    ASSERT_TRUE(order_rejected);
+    ASSERT_TRUE(edge_rejected);
+    ASSERT_TRUE(with_alias_runs);
+    ASSERT_TRUE(known_props_run);
+    PASS();
+}
+
+/* Fork patch (fork issue #4 fail-loud law, 2026-09-30): an unknown scope used
+ * to silently flip to the "files" semantics via a boolean three-way, so a
+ * caller asking for the symbol blast radius got changed files and no error. */
+TEST(tool_detect_changes_invalid_scope_is_teaching_error) {
+    char repo[CBM_SZ_4K];
+    snprintf(repo, sizeof(repo), "%s/cbm-detect-invalid-scope-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    char cache[CBM_SZ_4K];
+    snprintf(cache, sizeof(cache), "%s/cbm-detect-invalid-scope-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", cache, 1), 0);
+    cbm_mcp_server_t *srv = test_server_all_surface();
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    const char *project = "detect-invalid-scope-project";
+    ASSERT_EQ(cbm_store_upsert_project(store, project, repo), CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, project);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "detect_changes",
+        "{\"project\":\"detect-invalid-scope-project\",\"scope\":\"blast_radius\"}");
+    bool rejected = response && strstr(response, "invalid scope") &&
+                    strstr(response, "blast_radius") &&
+                    strstr(response, "\"isError\":true");
+
+    free(response);
+    cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    ASSERT_EQ(th_rmtree(cache), 0);
+    ASSERT_EQ(th_rmtree(repo), 0);
+
+    ASSERT_TRUE(rejected);
     PASS();
 }
 
@@ -21545,6 +21736,7 @@ SUITE(mcp) {
     RUN_TEST(tool_trace_path_caller_resolution_summary);
     RUN_TEST(tool_trace_path_evidence_columns_match_header_issue1542);
     RUN_TEST(tool_trace_path_unreadable_confidence_reports_not_recorded);
+    RUN_TEST(tool_trace_path_invalid_mode_is_teaching_error);
     RUN_TEST(tool_trace_path_edge_details_use_canonical_predecessor);
     RUN_TEST(tool_trace_path_evidence_columns_align_across_optional_modes);
     RUN_TEST(tool_trace_call_path_depth_clamped);
@@ -21656,6 +21848,8 @@ SUITE(mcp) {
     RUN_TEST(tool_manage_adr_get_accepts_symlink_path);
     RUN_TEST(tool_detect_changes_not_found_rich_error);
     RUN_TEST(tool_detect_changes_invalid_base_is_an_error);
+    RUN_TEST(tool_query_graph_unknown_property_is_teaching_error);
+    RUN_TEST(tool_detect_changes_invalid_scope_is_teaching_error);
     RUN_TEST(tool_detect_changes_preserves_utf8_git_path_and_impact_seed);
     RUN_TEST(tool_detect_changes_honesty_note_in_both_formats);
     RUN_TEST(cache_sweep_prunes_skip_logs_worker_temp_and_scratch);

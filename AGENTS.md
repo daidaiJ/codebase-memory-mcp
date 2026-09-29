@@ -79,6 +79,7 @@ workflow 只保留 `fork-win64.yml`（构建 + tag 发 release）。上游遗产
 |------|------|------|
 | 图谱查询静默漏报 | CALLS 边丢失时 trace_path 返回 callers_total:0，与真无调用不可分（fork #6/#7 已把防御升级为带内：trace_path 带 caller_resolution，detect_changes 带 resolution_caveat） | 「没有调用方」类否定结论仍建议先 grep 复核；带内注记是提示不是证明 |
 | `detect_changes` 非法 direction | 已 fail-loud（上游 commit `60390aff` 修复，fork 基线已含，tests/test_mcp.c 有断言 pin） | 无需再修；rebase 时确认该 teaching error 未被冲掉 |
+| 枚举参数静默兜底 | `direction` 之外的同型病：detect_changes `scope` 与 trace_path `mode`（fork 2026-09-30 补齐 teaching-error 校验）；query_graph 未知属性已走目录校验（`validate_cypher_property_refs`，fail-open 集合见 mcp.c） | 新增枚举参数必须带拒绝校验并测试先行；rebase 时确认三处校验未被冲掉 |
 | Windows DACL 检查 | fork 默认**跳过**不可信 ACE 遍历；`CBM_DACL_HARDENING=1` 才开回 | 属主校验两种模式都保留，别动它；多用户主机文档要提示开回 |
 | 内存预算 | cap 只封默认分数，显式 env 永远可上调（`default_capped` 标志随之清零） | 改 resolve_budget 时保持这个单语义 |
 | watcher 触发时序 | fork issue #10：脏变更需**两轮**签名相等才索引（HEAD 移动单轮即触发），成功索引后有 30s 冷却（`CBM_WATCH_COOLDOWN_S`，0 关闭）；`index_status` 带 `freshness` 块 | dirty 路径的 watcher 测试都是「stage + confirm」两轮——rebase 时别「简化」回单轮；freshness 锚是聚合口径，禁止 per-file mtime / Branch.head_sha |

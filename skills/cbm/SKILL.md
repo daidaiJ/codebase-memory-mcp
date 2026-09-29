@@ -56,7 +56,7 @@ PARENT=$(git rev-parse <commit>^)   # ⚠️ 不接受 ^ ~ 后缀，必须传完
 codebase-memory-mcp cli detect_changes "{\"project\":\"<PROJECT名>\",\"since\":\"$PARENT\",\"scope\":\"impact\"}"
 ```
 
-⚠️ `direction` 合法值仅 `inbound|outbound|both`——传非法值（如 "impact"）**静默返回空**（上游 #480 同款病）。`changed_files` 里的非代码文件是噪声，`impacted` 按 hop 距离排序。
+⚠️ `direction`/`scope` 传非法值会显式报错（2026-09-30 起 fail-loud，不再静默空）。`changed_files` 里的非代码文件是噪声，`impacted` 按 hop 距离排序。
 
 ### 4. 信任前置闸门
 
@@ -73,7 +73,7 @@ MCP `tools/list` 的 description 有意只保留触发语与判读契约（瘦�
 | 工具 | 触发 | 机制与判读边界 |
 |---|---|---|
 | `search_graph` | 定位定义/调用方、按名称模式扫符号面 | `query`（BM25 关键词）与 `semantic_query`（嵌入相似）互斥；行带 qn/file/lines，degree 列只统计 CALLS/USAGE/CALL_REFERENCE/INHERITS/IMPLEMENTS 五族边 |
-| `query_graph` | 多跳/聚合/复杂度排行/跨服务分析（配方见上节） | 总数是精确值或下界并带截断标记；**用 `next_cursor` 续读**（保持 query/project/graph 不变，format/max_rows 可变）；`graph=missed` 是覆盖盲区文件树，缺席≠完备 |
+| `query_graph` | 多跳/聚合/复杂度排行/跨服务分析（配方见上节） | 总数是精确值或下界并带截断标记；**用 `next_cursor` 续读**（保持 query/project/graph 不变，format/max_rows 可变）；`graph=missed` 是覆盖盲区文件树，缺席≠完备；属性拼错会显式报错（2026-09-30 起目录校验），报错指引 `get_graph_schema` |
 | `get_architecture` | 陌生/大型仓库第一站 | 省略 aspects = languages/packages/entry_points；`overview` = 除 file_tree 外的紧凑集；`cycles` 永远 opt-in；`path` 按目录前缀收窄 |
 | `get_graph_schema` | 写 Cypher 前查节点/边目录（无 skill 客户端的属性发现通道） | 默认返回各 label/edge 计数；`diagnostics=full` 追加可查属性清单（约 5.6KB）；query_graph 对未知属性**静默返回空**——拼错属性时 schema 是唯一分辨手段 |
 

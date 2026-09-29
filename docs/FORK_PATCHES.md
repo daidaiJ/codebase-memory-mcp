@@ -489,3 +489,50 @@ query_graph 未知属性 fail-loud 校验——同一 silent-empty 家族（#480
 
 **验证**：`mcp` 套件全绿（gcc 13.2，SANITIZE=）；`cli` 套件 12 个预存失败
 不变（同 §11 基线）。
+
+## 13. Fail-loud validation: scope/mode enums + unknown Cypher properties (2026-09-30)
+
+**背景**（维护者盘点 open issues 后批准）：#480（direction 静默空）上游已修复
+（closed，`60390aff`），但同型病在枚举参数里还活着两处，实测于
+v0.11.0-fork.2：
+
+- `detect_changes` 的 `scope`：布尔三元
+  `want_symbols = !scope || "symbols" || "impact"` 把任何非法值静默翻成 files
+  语义——调用方要符号爆炸半径，拿到的是 changed files（实测 `scope:"bogus"`
+  正常跑完无告警）。
+- `trace_path` 的 `mode`：未知值原样回显、按 calls 语义跑完
+  （data_flow/cross_service 标志静默为 false）。
+
+**修改点**：两处 teaching-error，复用 direction 的拒绝契约（错误文案列出合法
+值），测试先行钉契约：`tool_detect_changes_invalid_scope_is_teaching_error`、
+`tool_trace_path_invalid_mode_is_teaching_error`。
+
+**query_graph 未知属性目录校验**（同一次实测发现的更大缺口）：引擎把未知属性
+逐行求值为 NULL——`WHERE f.bogus = 1` 得到权威假象 `total: 0`，`RETURN
+f.bogus` 得到空值列。现在 `handle_query_graph` 在执行前用公开 AST
+（`cbm_cypher_parse`，引擎零改动）+ 属性目录（`cbm_store_get_schema`，每
+label/每 edge type 的 distinct 属性键）校验全部 (变量, 属性) 引用：WHERE
+表达树与遗留扁平条件、RETURN/WITH 投影、多参函数实参、CASE 分支、ORDER BY
+的 `var.prop` 键、inline 模式过滤、typed 边属性。
+
+**fail-open 集合**（校验从不拒绝它无法判断的查询）：解析失败（execute 自己
+报同样的错）、label/edge type 不在目录（含空图）、虚拟变量（WITH 别名、
+UNWIND）、无 label 的模式、无类型的关系、graph="missed"（shadow project 的
+文件树属性集不同）、UNWIND 表达式（字符串形态，v1 跳过）。mcp 全套 324 用例
+零误杀即回归护栏——既有复杂度排行/WITH/UNION/CASE 配方全部不受影响。
+
+**测试**：`tool_query_graph_unknown_property_is_teaching_error`——WHERE/
+RETURN/inline/ORDER BY/typed-edge 五类拒绝 + WITH 别名放行 + 已知属性放行。
+
+**detect_changes 升面复审结论（#5 的「待可信度修复」）**：direction 与 scope
+现已 fail-loud，honesty 注记在位（§6）；剩余阻塞 = 上游 #2128
+（framework-driven entry points 盲区）仍 open 且无可借修复。维持 analysis/all
+面，待 #2128 关闭或 fork 实现 entry-point 感知后再议。
+
+**trace_path outbound 对称摘要（#6 的 revisit 条款）**：结论是不做——上游
+全库无 callee_resolution 概念（无可借 PR）；outbound 侧的真实社区痛点是
+#1365（open：qualified_name 解析错起点、混入无关 callees），那是名称解析缺
+陷，hop 摘要暴露不了它；§6 的不对称是设计决定。#1365 修复 + 现场证据出现后
+再议。
+
+**验证**：`mcp` 324 PASS / 0 FAIL（gcc 13.2，SANITIZE=）。
