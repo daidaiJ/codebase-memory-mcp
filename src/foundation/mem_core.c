@@ -202,8 +202,11 @@ static void class_sub(cbm_mem_class_t cls, size_t bytes, size_t blocks) {
  * Keep the suppression local instead of weakening the shared flag set. clang
  * shares __MINGW64__ but rejects the gcc-only warning group under -Werror
  * (-Wunknown-warning-option, broke the v0.11.0-fork.2 CI run), so the pragma
- * is gcc-only. */
+ * is gcc-only. The macro pairs the push/pop: clang must see neither. */
 #if (defined(__MINGW32__) || defined(__MINGW64__)) && !defined(__clang__)
+#define CBM_GCC13_MAYBE_UNINIT_SUPPRESS 1
+#endif
+#if defined(CBM_GCC13_MAYBE_UNINIT_SUPPRESS)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
@@ -232,7 +235,7 @@ size_t cbm_mem_usable_size(const void *block) {
 }
 #endif
 
-#if defined(__MINGW32__) || defined(__MINGW64__)
+#if defined(CBM_GCC13_MAYBE_UNINIT_SUPPRESS)
 #pragma GCC diagnostic pop
 #endif
 
