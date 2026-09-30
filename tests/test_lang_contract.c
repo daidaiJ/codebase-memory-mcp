@@ -94,6 +94,7 @@ static cbm_store_t *lang_open_indexed(LangProj *lp) {
     if (!lp->srv) {
         return NULL;
     }
+    cbm_mcp_server_set_tool_profile(lp->srv, CBM_MCP_TOOL_PROFILE_ALL); /* fork #5: the MINIMAL default surface lacks the indexing tools */
     char args[700];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);

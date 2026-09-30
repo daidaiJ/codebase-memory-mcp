@@ -71,9 +71,14 @@ static char *index_capture(RProj *lp) {
     char *saved = prior ? strdup(prior) : NULL;
     cbm_setenv("CBM_CACHE_DIR", lp->cachedir, 1);
     capture_reset();
+    /* Fork issue #3: the process-wide default level is ERROR; the INFO-level
+     * routing line under test would be filtered before reaching the sink. */
+    CBMLogLevel saved_route_level = cbm_log_get_level();
+    cbm_log_set_level(CBM_LOG_INFO);
     cbm_log_set_sink_ex(capture_sink, CBM_LOG_SINK_TEE);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     cbm_log_set_sink(NULL);
+    cbm_log_set_level(saved_route_level);
     if (saved) {
         cbm_setenv("CBM_CACHE_DIR", saved, 1);
         free(saved);

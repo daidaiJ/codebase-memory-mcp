@@ -128,6 +128,9 @@ static cbm_store_t *ei_index_files(EILangProj *lp, const EILangFile *files, int 
     lp->srv = cbm_mcp_server_new(NULL);
     if (!lp->srv)
         return NULL;
+    /* Fork issue #5: the bare default surface is MINIMAL and has no
+     * index_repository — these fixtures exercise the full indexing pipeline. */
+    cbm_mcp_server_set_tool_profile(lp->srv, CBM_MCP_TOOL_PROFILE_ALL);
 
     char args[700];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);

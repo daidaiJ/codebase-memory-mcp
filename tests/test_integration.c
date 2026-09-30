@@ -127,6 +127,7 @@ static int integration_setup(void) {
     g_srv = cbm_mcp_server_new(NULL);
     if (!g_srv)
         return -1;
+    cbm_mcp_server_set_tool_profile(g_srv, CBM_MCP_TOOL_PROFILE_ALL); /* fork #5: the MINIMAL default surface lacks the indexing tools */
 
     /* Index our temp project via MCP tool handler */
     char args[512];
@@ -312,16 +313,30 @@ TEST(integ_mcp_search_graph_by_name) {
 TEST(integ_mcp_query_graph_functions) {
     char args[512];
     snprintf(args, sizeof(args),
-             "{\"project\":\"%s\",\"query\":\"MATCH (f:Function) WHERE f.project = '%s' "
+             "{\"project\":\"%s\",\"query\":\"MATCH (f:Function) WHERE f.name = 'greet' "
              "RETURN f.name LIMIT 20\"}",
-             g_project, g_project);
+             g_project);
 
     char *resp = call_tool("query_graph", args);
     ASSERT_NOT_NULL(resp);
-    /* Should return results (may be in various formats depending on Cypher output).
-     * At minimum, should not be an error. */
-    ASSERT_TRUE(strstr(resp, "row") || strstr(resp, "greet") || strstr(resp, "Add") ||
-                strstr(resp, "result") || strstr(resp, "f.name"));
+    /* Fork issue #4/#5 contract: a property the engine cannot evaluate
+     * (f.project is not a queryable property — the project scope comes from the
+     * tool argument) must fail loud with a teaching error, never a silent
+     * total:0. The upstream form of this test relied on the empty result still
+     * carrying the column header. */
+    char unknown[512];
+    snprintf(unknown, sizeof(unknown),
+             "{\"project\":\"%s\",\"query\":\"MATCH (f:Function) WHERE f.project = '%s' "
+             "RETURN f.name LIMIT 20\"}",
+             g_project, g_project);
+    char *rejected = call_tool("query_graph", unknown);
+    ASSERT_NOT_NULL(rejected);
+    ASSERT_NOT_NULL(strstr(rejected, "unknown property"));
+    ASSERT_NOT_NULL(strstr(rejected, "isError"));
+    free(rejected);
+
+    /* The valid-property query must return real rows. */
+    ASSERT_NOT_NULL(strstr(resp, "greet"));
     free(resp);
     PASS();
 }
@@ -420,6 +435,8 @@ TEST(integ_mcp_trace_path_cross_service) {
              "{\"function_name\":\"greet\",\"project\":\"%s\","
              "\"direction\":\"outbound\",\"mode\":\"cross_service\"}",
              g_project);
+    /* fork #5: trace_path is outside the MINIMAL default surface */
+    cbm_mcp_server_set_tool_profile(srv, CBM_MCP_TOOL_PROFILE_ALL);
     char *resp = cbm_mcp_handle_tool(srv, "trace_path", args);
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "farewell"));
@@ -782,6 +799,8 @@ TEST(index_reports_excluded_subtrees_issue411) {
 
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
+    /* fork #5: the MINIMAL default surface lacks index_repository */
+    cbm_mcp_server_set_tool_profile(srv, CBM_MCP_TOOL_PROFILE_ALL);
     char args[600];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", tmp);
     char *resp = cbm_mcp_handle_tool(srv, "index_repository", args);

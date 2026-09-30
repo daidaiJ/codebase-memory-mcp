@@ -110,6 +110,7 @@ static cbm_store_t *ri_index_capture(RProj *lp, char **out_resp) {
     if (!lp->srv) {
         return NULL;
     }
+    cbm_mcp_server_set_tool_profile(lp->srv, CBM_MCP_TOOL_PROFILE_ALL); /* fork #5: the MINIMAL default surface lacks the indexing tools */
     char args[700];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
@@ -843,6 +844,7 @@ TEST(index_relative_repo_path_canonicalized) {
     if (!lp.srv) {
         FAIL("server alloc failed");
     }
+    cbm_mcp_server_set_tool_profile(lp.srv, CBM_MCP_TOOL_PROFILE_ALL); /* fork #5: the MINIMAL default surface lacks the indexing tools */
 
     /* chdir into the repo and index "." — restore cwd immediately after. */
     char oldcwd[PATH_MAX];

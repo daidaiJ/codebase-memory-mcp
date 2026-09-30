@@ -70,7 +70,10 @@ static inline cbm_store_t *rh_open_indexed(RProj *lp) {
 
     cbm_store_t *store = NULL;
     lp->srv = cbm_mcp_server_new(NULL);
+    /* Fork issue #5: the bare default surface is MINIMAL and has no
+     * index_repository — the harness exercises the production indexing flow. */
     if (lp->srv) {
+        cbm_mcp_server_set_tool_profile(lp->srv, CBM_MCP_TOOL_PROFILE_ALL);
         char args[700];
         snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
         char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);

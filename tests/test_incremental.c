@@ -291,6 +291,7 @@ static int incremental_setup(void) {
     g_srv = cbm_mcp_server_new(NULL);
     if (!g_srv)
         return -1;
+    cbm_mcp_server_set_tool_profile(g_srv, CBM_MCP_TOOL_PROFILE_ALL); /* fork #5: the MINIMAL default surface lacks the indexing tools */
 
     g_rss_before_full = cbm_mem_rss();
 

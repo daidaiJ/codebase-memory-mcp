@@ -1061,11 +1061,16 @@ TEST(store_bfs_trail_warns_when_path_rows_are_truncated) {
     }
 
     trail_log[0] = '\0';
+    /* Fork issue #3: the process-wide default level is ERROR, which filters
+     * the warn line under test before it reaches the sink. */
+    CBMLogLevel saved_trail_level = cbm_log_get_level();
+    cbm_log_set_level(CBM_LOG_WARN);
     cbm_log_set_sink(capture_trail_log);
     const char *types[] = {"CALLS"};
     cbm_traverse_result_t result = {0};
     int rc = cbm_store_bfs_trail(s, ids[0], "outbound", types, 1, 10, 5000, &result);
     cbm_log_set_sink(NULL);
+    cbm_log_set_level(saved_trail_level);
 
     ASSERT_EQ(rc, CBM_STORE_OK);
     ASSERT_TRUE(result.truncated);

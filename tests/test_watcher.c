@@ -2161,6 +2161,10 @@ TEST(watcher_sustained_failure_logs_once_issue2015) {
     }
 
     sustained_log_hits = 0;
+    /* Fork issue #3: the process-wide default level is ERROR, which filters
+     * the warn line under test before it reaches the sink. */
+    CBMLogLevel saved_sustained_level = cbm_log_get_level();
+    cbm_log_set_level(CBM_LOG_WARN);
     cbm_log_set_sink(sustained_log_sink);
 
     /* Drive well past the threshold (10): poll until the 14th failed reindex.
@@ -2180,6 +2184,7 @@ TEST(watcher_sustained_failure_logs_once_issue2015) {
     }
 
     cbm_log_set_sink(NULL);
+    cbm_log_set_level(saved_sustained_level);
 
     ASSERT_EQ(failing_index_calls, 14);
     ASSERT_EQ(cbm_watcher_index_failure_count(w, "sust-repo"), 14);

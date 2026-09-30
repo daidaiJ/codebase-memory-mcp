@@ -619,6 +619,10 @@ TEST(importance_second_index_run_keeps_exactly_one_key) {
 
     atomic_store(&g_saw_incr_importance, 0);
     atomic_store(&g_saw_full_importance, 0);
+    /* Fork issue #3: the process-wide default level is ERROR; the INFO-level
+     * pass.timing lines under test would be filtered before reaching the sink. */
+    CBMLogLevel saved_timing_level = cbm_log_get_level();
+    cbm_log_set_level(CBM_LOG_INFO);
     cbm_log_set_sink_ex(imp_pass_sink, CBM_LOG_SINK_TEE);
 
     cbm_pipeline_t *p1 = cbm_pipeline_new(root, db_path, CBM_MODE_FULL);
@@ -640,6 +644,7 @@ TEST(importance_second_index_run_keeps_exactly_one_key) {
     cbm_incremental_route_t route = cbm_pipeline_incremental_test_last_route();
     cbm_pipeline_free(p2);
     cbm_log_set_sink(NULL);
+    cbm_log_set_level(saved_timing_level);
 
     /* Route proof: without it a silent fall-back to a full reindex would make
      * the duplicate-key assertion below vacuous. */

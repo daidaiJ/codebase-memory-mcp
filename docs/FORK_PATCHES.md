@@ -49,7 +49,18 @@ re-check, where all 7 POSIX-only supervisor tests failed with the worker
 answering "not available in the minimal tool profile"; the IDXCANON and
 IDX853 forked children in `tests/test_mcp.c` construct their host with the
 bare minimal default and now use `test_server_all_surface()` for the same
-reason (auto_index likewise fires only on ALL-profile sessions). Consequence
+reason (auto_index likewise fires only on ALL-profile sessions). The same
+WSL full-suite run exposed the default in ~24 more upstream fixtures that
+index via the MCP flow — the shared `rh_open_indexed` harness
+(`tests/repro/repro_harness.h`), the per-file `ei_index_files`-style helpers
+of the probe/grammar/matrix suites, `test_incremental`,
+`test_index_resilience`, `test_integration` — each now opts into ALL.
+`integ_mcp_query_graph_functions` had also been passing vacuously: its
+`WHERE f.project` relied on the engine evaluating an unsupported property to
+empty (the project scope comes from the tool argument), with the empty
+result still carrying the column header the assertion matched. The
+fail-loud unknown-property validation (fork #4) now rejects that query, so
+the test queries a real property and pins the teaching error. Consequence
 worth knowing: `auto_index` fires only
 on ALL-profile sessions (upstream gate kept), so an explicitly-enabled
 `auto_index` pairs with `--tool-profile=all`; the minimal workflow refreshes
@@ -98,7 +109,11 @@ Resident resources and self-activation are opt-in:
   with `config set auto_watch true`.
 - **Log level default `error`** (`src/foundation/log.c`). INFO chattered
   warn-level allocator noise to CLI stderr on every cold start. `CBM_LOG_LEVEL`
-  still overrides.
+  still overrides. Tests that capture a specific INFO/WARN line set the level
+  explicitly for their capture window (2026-09-30 WSL full-suite migration:
+  `test_store_search` trail_truncated, `test_watcher` sustained_failure,
+  `test_index_format` pipeline.route, `test_importance` pass.timing — all
+  asserted lines the ERROR default filtered before any sink saw them).
 - **Memory budget capped at 2048 MiB** (`src/foundation/mem.c`,
   `cbm_mem_resolve_budget`). Upstream's bare RAM fraction handed 11.4 GB on a
   32 GB machine by default; the leak record (#832/#1084/#45/#1654) does not
