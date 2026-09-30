@@ -86,6 +86,7 @@ workflow 只保留 `fork-win64.yml`（构建 + tag 发 release）。上游遗产
 | MinGW 分配器 wrap | `--wrap=_msize` 经 `mi_is_in_heap_region` 判归属，并发扩页映射时会误判（`charge_size` 内 RtlSizeHeap 陷阱，2026-09-29 实测） | mem_core 的 usable-size 在 MinGW 直接走 `mi_usable_size`，别改回 `_msize` |
 | CLANG64 CI 与 MinGW pragma | clang 同样定义 `__MINGW64__`，但会以 `-Wunknown-warning-option` 拒绝 gcc 专属告警组（v0.11.0-fork.2 首跑即炸在 `-Wmaybe-uninitialized` pragma） | MinGW 守卫里 gcc 专属告警组的 pragma 一律补 `&& !defined(__clang__)`；本地裸 LLVM clang 版本宽松，别拿它当 CI 等价物 |
 | POSIX-only 测试的 fork 契约 | fork 两处默认反转（#3 日志 ERROR、#5 minimal 面）最初只迁移过 Windows 聚焦套件；Linux-only 路径（supervisor 7 测、~24 个索引 fixture helper、4 个日志捕获窗、integration 的 f.project 空洞断言）在 2026-09-30 WSL 全量复检一次性暴露并全部迁移 | rebase 后用 WSL worktree + `test-par` 跑一次全量再发版；新 fixture 要么 `test_server_all_surface()`，要么捕获日志窗口内显式 `cbm_log_set_level` |
+| WSL 全量跑的 UBSan 噪声 | 可恢复报告两类：`pass_semantic_edges.c:1159` 对 0 边 worker 的 `memcpy(NULL, 0)`（我们自己代码，良性 UB，修法是 count>0 守卫）+ vendored objectscript scanner 两处同类；测试全部照常 PASS，非内存安全发现 | WSL 复检看到这两类不必重查；真要清就补 count 守卫 + 上游同步时带 scanner 修复，别把它们当回归 |
 | 守护进程冷启 | ~5s（Windows + DACL + 指纹哈希） | CLI 面的策略拒绝必须在 bootstrap **之前**（run_cli 已前置，别挪到 daemon 执行后） |
 
 ## 快速上手命令
