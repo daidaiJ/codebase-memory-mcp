@@ -1,6 +1,6 @@
 # codebase-memory-mcp (fork)
 
-> 代码库知识图谱 MCP 服务的一个精简 fork — 默认只暴露 3 个经实测验证的工具，其余默认关闭或可配置禁用
+> 代码库知识图谱 MCP 服务的一个精简 fork — MCP 面默认只暴露 4 个经实测验证的工具，常驻资源全部 opt-in，拒绝与诚实性全部显式
 
 上游项目：[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)（C 语言，tree-sitter + mimalloc）。本 fork 维护一条补丁分支（`feat/minimal-tool-surface`），改动原则：
 
@@ -24,6 +24,44 @@
 | Windows DACL | 祖先链有宽松 ACL 即拒启 | **默认跳过**该遍历，属主校验保留；`CBM_DACL_HARDENING=1` 开回 | 单用户本地工具不该被共享工具目录的 ACL 挡在门外 |
 
 技术细节与逐文件修改点见 [docs/FORK_PATCHES.md](docs/FORK_PATCHES.md)。
+
+## 设计思路
+
+上面的差异不是散点调参，而是四条互相咬合的原则（每条在 fork issues 里立项、
+`docs/FORK_PATCHES.md` 逐文件落实、测试钉契约）：
+
+1. **面上的工具靠对照实验活下来，不是靠存在**。每保留一个工具都先回答：grep /
+   codegraph / 客户端自带工具做这件事要多少次调用？只有图谱独有能力（架构概览、
+   全仓复杂度排行、符号精确发现、属性目录）才值得占 MCP 面；与 Read/grep 重叠的
+   一律换出，还省掉每次会话冷启。`tools/list` 的 description 同理只留触发语 +
+   判读契约（三工具 -40% wire 开销），分页/续读等机制细节下沉到配套 skill 按需加载。
+2. **常驻资源与自我激活一律 opt-in**。这是单用户本地工具，不是服务：文件监听、
+   UI 环回 HTTP、会话自动索引、info 级日志都不该在「零使用意图」时自己转起来。
+   fork 还给 opt-in 回来的 watcher 重新定了价：一次 watcher 触发的 delta 接近一次
+   全量增量索引，所以「首次看见就索引」是错的成本模型——脏变更要两轮签名确认
+   （editor 写文件突发只付一次钱），成功索引后冷却 30s，commit 单轮即触发。
+3. **fail-loud + 带内诚实性**。拒绝必须非零退出 + 显式 message；响应里的每个
+   「空/零」都必须可判读——`callers_total: 0` 旁边带 `caller_resolution`
+   （2/3 resolved，1 unresolved），`impacted: []` 旁边带 `resolution_caveat`
+   （CALLS 边是解析启发式，0 影响不等于无影响），`index_status` 的 `freshness`
+   块在没有信号时整块缺席（缺席 = 没数据，从不伪装新鲜）。
+4. **策略下放 + CLI 全量是根基**。被裁剪的是 MCP 面，不是能力：CLI 保留全部
+   17 工具（daemon 内部会话始终 ALL），全局 `_config.db` 之上项目可带自己的
+   `.cbm/config.json`；策略拒绝在 daemon 冷启之前完成（不花 5s 才知道工具没开）。
+
+## 修复的上游坏取舍
+
+| 领域 | 上游取舍 | 为什么不好 | fork 的修复 |
+|------|---------|-----------|------------|
+| 工具面 | 17 个工具全量常驻 `tools/list` | 与客户端 Read/grep 重复的工具白占每次会话的上下文，还稀释真正有用的触发信号 | 默认 minimal 面（4 工具）+ `tools_disabled` 名单 + profile 三处一致（客户端/守护进程/wire 边界） |
+| 失败模式 | 枚举参数静默兜底：`scope:"bogus"` 按 files 语义跑完、未知 Cypher 属性静默返回 `total: 0` | **权威假阴性**：调用方要符号爆炸半径拿到的是 changed files，还以为查过了 | 全部改 teaching-error（错误文案列出合法值）；query_graph 执行前做属性目录校验，fail-open 只放过它无法判断的查询 |
+| 可信度 | `trace_path` 返回 `callers_total: 0`，「没有调用方」与「调用边解析失败」不可分（框架/DI 派发对静态解析隐形） | 字段读成否定结论，agent 据此下错判断 | 带内 `caller_resolution` 摘要 + 半数未解析时固定教学注记；detect_changes 同型补 `resolution_caveat` |
+| 内存 | RAM × 25%-50%，无上限 | 32GB 机器默认拿 11.4GB，而上游自身的泄漏史并未清零 | 默认封顶 2048 MiB；`CBM_MEM_BUDGET_MB` 显式设置仍可上调到物理内存 |
+| watcher | 首次看见脏变更就索引 | 一次触发 ≈ 一次全量增量索引的成本，编辑器写文件突发会连着触发多次 | 双轮签名确认 + 成功后 30s 冷却 + commit 单轮例外 + `index_status.freshness` 让新鲜度可观测（新鲜度锚只用聚合口径，禁止 per-file mtime） |
+| 存储 | 缓存与 store 只增不减 | 跳过日志无界、崩溃残留 temp/staging、contentless-FTS 死行和孤儿 lsp_surface 永不回收 | 纯减法 retention sweep（常数不参数化）+ `index_status` 的 `maintenance` 计数与 rebuild 建议——数字给维护者，不自动重建 |
+| 深遍历 | LIMIT 不省递归 CTE，全深度可达集照样枚举 | 想省只能盲跑或不跑，没有「更深还有一层」的信号 | `depth_frontier` + `deepen_cursor`：更深一层是 agent 主动 PULL（c2 token 把 depth 移出身份哈希，收紧 depth 参数不可能绕过） |
+| Windows DACL | 祖先链存在宽松 ACL 即拒绝启动 | 共享工具目录（如 `D:\tool-cli`）继承的 Authenticated Users ACE 把单用户工具挡在门外，且用户无法控制祖先目录 | 默认跳过不可信 ACE 遍历，属主校验两种模式都保留；`CBM_DACL_HARDENING=1` 在多用户主机开回 |
+| 工具描述 | 全部机制细节常驻 `tools/list` description | 常驻 wire 开销既稀释触发信号又烧上下文，而细则只有工具被选中后才需要 | 描述 = 触发语 + 判读契约；参数语义只住在 inputSchema；机制与组合配方进配套 skill 渐进披露 |
 
 ## 快速开始
 
@@ -59,7 +97,7 @@ CLI 保留全部 17 个工具（除非被 `tools_disabled` 禁用）——被裁
 }
 ```
 
-默认即最小面（3 工具）。要全量：`"args": ["--tool-profile=all"]`；可选 `minimal`（默认）/ `analysis` / `scout`。
+默认即最小面（4 工具）。要全量：`"args": ["--tool-profile=all"]`；可选 `minimal`（默认）/ `analysis` / `scout`。
 
 ## 核心配置
 
@@ -129,10 +167,14 @@ codebase-memory-mcp config reset tools_disabled       # 恢复默认
 
 ## 文档导航
 
-| 文档 | 内容 |
-|------|------|
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 配置参考（含 tool profiles 与三层优先级） |
-| [docs/FORK_PATCHES.md](docs/FORK_PATCHES.md) | fork 补丁清单：动机、修改点、验证矩阵 |
-| [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md) | 上游原版 README（架构、安装、全部工具说明） |
-| [AGENTS.md](AGENTS.md) | 智能体协作指南（目录结构、开发约定、坑位清单） |
-| [skills/cbm/SKILL.md](skills/cbm/SKILL.md) | Agent Skill：何时用/不用 cbm、安装方法、三个实测有效的命令配方与硬规则、MCP 最小面工具细则（描述瘦身后机制细节的渐进披露载体） |
+各文档均为中文默认，同名 `.en.md` 为英文版。
+
+| 读者 | 文档 | 内容 |
+|------|------|------|
+| 👤 人类用户 | [docs/HUMAN_GUIDE.md](docs/HUMAN_GUIDE.md) | 安装部署、三层配置全参数、watcher/内存调优、排障表 |
+| 🤖 AI Agent | [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) | 省 token 版：何时用/不用 cbm、命令档位、机器契约（诚实性字段）、错误速诊 |
+| | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 配置参考（含 tool profiles 与三层优先级） |
+| | [docs/FORK_PATCHES.md](docs/FORK_PATCHES.md) | fork 补丁清单：动机、修改点、验证矩阵 |
+| | [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md) | 上游原版 README（架构、安装、全部工具说明） |
+| | [AGENTS.md](AGENTS.md) | 智能体协作指南（目录结构、开发约定、坑位清单） |
+| | [skills/cbm/SKILL.md](skills/cbm/SKILL.md) | Agent Skill：MCP 最小面工具细则的渐进披露载体 |

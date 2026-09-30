@@ -84,4 +84,4 @@ MCP 最小面没有 trace_path / index_status / detect_changes：一跳调用链
 1. **空结果 ≠ 真阴性**：依次排查 ① 参数非法（direction/项目名/SHA 格式）→ ② coverage 盲区 → ③ grep 复核，三关过了才准信"没有调用方/没有影响"。
 2. 图谱与代码文件冲突时，以代码文件为准，会话开头重跑 hook 或 `codebase-memory-mcp cli index_repository --repo-path . --mode fast`。
 3. 变异管理类（index_repository / delete_project / manage_adr / ingest_traces）同样走 CLI，非必要不碰。
-4. 若要恢复 MCP 形态（受限客户端嵌入场景）：fork 的 MCP 默认只暴露 **3 个工具**（search_graph / query_graph / get_architecture；fork issue #5 将 detect_changes 换出，待可信度修复），`--tool-profile=all` 恢复全量，`--tool-profile=minimal|analysis|scout` 可选；全局 `tools_disabled` 名单与项目本地 `.cbm/config.json` 可细粒度禁用（双侧生效、fail-loud）。配置键见 `codebase-memory-mcp config list`。
+4. 若要恢复 MCP 形态（受限客户端嵌入场景）：fork 的 MCP 默认只暴露 **4 个工具**（search_graph / query_graph / get_architecture / get_graph_schema；fork issue #5 将 detect_changes 换出，待可信度修复；get_graph_schema 为 2026-09-30 增补的无 skill 客户端属性发现通道），`--tool-profile=all` 恢复全量，`--tool-profile=minimal|analysis|scout` 可选；全局 `tools_disabled` 名单与项目本地 `.cbm/config.json` 可细粒度禁用（双侧生效、fail-loud）。配置键见 `codebase-memory-mcp config list`。
